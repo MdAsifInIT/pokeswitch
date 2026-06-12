@@ -89,3 +89,17 @@ dotnet build
 # Run the PokeSwitch application
 dotnet run --project PokeSwitch/PokeSwitch.csproj
 ```
+
+### How to Publish as a Single Executable
+To compile and package the application into a single `.exe` file, run the following command from the root directory:
+
+```bash
+# Framework-dependent Single Executable (requires .NET 10 runtime installed on target system)
+dotnet publish PokeSwitch/PokeSwitch.csproj -c Release -r win-x64
+
+# Self-contained Single Executable (includes .NET 10 runtime, making it run anywhere without installing .NET)
+dotnet publish PokeSwitch/PokeSwitch.csproj -c Release -r win-x64 --self-contained true
+```
+
+The output executable `PokeSwitch.exe` will be generated in:
+`PokeSwitch/bin/Release/net10.0-windows10.0.17763.0/win-x64/publish/`
