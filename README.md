@@ -1,23 +1,91 @@
 # PokeSwitch
 
-PokeSwitch is a utility designed to seamlessly toggle Docker Desktop and its WSL2 backend on and off. This is highly optimized for environments where WSL is exclusively used for Docker, allowing you to quickly free up RAM and save battery when Docker is not in use.
+PokeSwitch is a lightweight, clean WPF utility designed to seamlessly toggle Docker Desktop and its WSL2 backend on and off. This tool is highly optimized for developers whose WSL environment is primarily or exclusively used for Docker, allowing them to quickly free up gigabytes of RAM (reclaiming the WSL `vmmem` memory) and save laptop battery when Docker is not active.
+
+---
 
 ## Features
 
-- **Desktop Mode**: Gracefully stops all active Docker containers, shuts down Docker Desktop, and safely purges the WSL2 `vmmem` subsystem from RAM to conserve resources.
-- **Server Mode**: Spins up Docker Desktop in the background, waits for the daemon to respond, and automatically wakes up all existing containers.
-- Simple, one-click or script-based toggling for rapid environment switching.
+- **Dashboard**: Real-time status indicators showing:
+  - **Docker Status**: Running or Stopped.
+  - **WSL Status**: Active or Inactive.
+  - **Container Count**: Active / Total containers.
+  - **VMMem RAM Usage**: Live RAM consumed by the WSL `vmmem` subsystem.
+- **Start WSL Keep-Alive**: Starts the WSL distro in a headless server state (`sleep infinity`) without booting Docker Desktop.
+- **Boot Docker Engine**: Full spin-up of Docker Desktop, waiting for the daemon to respond, and automatically waking up all existing containers.
+- **Stop Docker Engine**: Gracefully stops all active containers and shuts down Docker Desktop processes.
+- **Nuclear Shutdown**: Gracefully stops containers, shuts down Docker, and purges the WSL2 subsystem (`wsl --shutdown`) to immediately reclaim RAM.
 
-## Getting Started
+---
+
+## Folder Architecture
+
+```text
+pokeswitch/
+├── PokeSwitch.sln             # C# Visual Studio Solution File
+├── pokeswitch-config.json     # Configuration file (WSL distro name, paths, etc.)
+├── README.md                  # Project Documentation
+└── PokeSwitch/                # Main Application Project
+    ├── app.manifest           # Application manifest
+    ├── App.xaml / App.xaml.cs # WPF Application entry point
+    ├── AssemblyInfo.cs        # Assembly metadata
+    ├── MainWindow.xaml        # MainWindow layout markup
+    ├── MainWindow.xaml.cs     # MainWindow UI and interaction logic
+    ├── Models/
+    │   └── AppConfig.cs       # Application configuration models
+    ├── Resources/
+    │   └── PokeSwitch.ico     # Application Icon
+    └── Services/
+        ├── ConfigManager.cs   # Config file loader/saver
+        └── DockerManager.cs   # WSL and Docker process management library
+```
+
+---
+
+## Configuration (`pokeswitch-config.json`)
+
+The application is configured using a `pokeswitch-config.json` file. Here is the default schema:
+
+```json
+{
+  "wslDistroName": "Ubuntu",
+  "dockerDesktopPath": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
+  "logging": {
+    "enabled": true,
+    "maxLines": 500
+  },
+  "dashboard": {
+    "pollIntervalSeconds": 3
+  },
+  "autoStartWslOnLaunch": false,
+  "autoStartDockerOnLaunch": false
+}
+```
+
+### Configuration Keys:
+- `wslDistroName`: The name of the WSL2 distro to run/manage.
+- `dockerDesktopPath`: The local path to your `Docker Desktop.exe` installation.
+- `logging.enabled`: Set to `true` to view status outputs in the terminal control inside the app.
+- `dashboard.pollIntervalSeconds`: The interval (in seconds) at which the dashboard refreshes the status.
+- `autoStartWslOnLaunch`: Automatically start WSL keep-alive when PokeSwitch opens.
+- `autoStartDockerOnLaunch`: Automatically boot Docker Desktop and containers when PokeSwitch opens.
+
+---
+
+## Getting Started & Build Instructions
 
 ### Prerequisites
-- Docker Desktop installed on Windows.
-- WSL2 enabled and acting as the Docker backend.
+- Windows OS (with WPF support)
+- .NET 10 SDK installed
+- Docker Desktop installed
+- WSL2 enabled
 
-### Usage
-- Use the provided `toggle-docker.ps1` PowerShell script to switch between Desktop (Docker Off) and Server (Docker On) modes.
-- Alternatively, run the PokeSwitch Windows Application for a GUI-based experience.
+### How to Build & Run
+From the root directory:
+```bash
+# Restore dependencies and build the solution
+dotnet build
 
-## Contributing
-
-Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
+# Run the PokeSwitch application
+dotnet run --project PokeSwitch/PokeSwitch.csproj
+```
