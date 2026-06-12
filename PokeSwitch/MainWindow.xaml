@@ -1,0 +1,186 @@
+<ui:FluentWindow x:Class="PokeSwitch.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="PokeSwitch - DevSecOps Control" Height="650" Width="850"
+        WindowStartupLocation="CenterScreen"
+        ExtendsContentIntoTitleBar="True"
+        WindowBackdropType="Mica"
+        Background="{x:Null}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Title Bar -->
+        <ui:TitleBar Title="PokeSwitch" Grid.Row="0" Margin="0,0,0,10">
+            <ui:TitleBar.Icon>
+                <Image Source="pack://application:,,,/pokemon_go_play_game_charcter_icon-icons.com_69165.ico" Width="18" Height="18"/>
+            </ui:TitleBar.Icon>
+        </ui:TitleBar>
+
+        <!-- Settings Flyout -->
+        <ui:Flyout x:Name="SettingsFlyout" Placement="Bottom" IsOpen="False">
+            <StackPanel Width="300" Margin="10">
+                <TextBlock Text="Settings" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                
+                <TextBlock Text="WSL Distro Name:" Margin="0,5,0,0"/>
+                <ui:TextBox x:Name="TxtWslDistro" Text="{Binding Config.WslDistroName, Mode=TwoWay}" Margin="0,5,0,10"/>
+                
+                <TextBlock Text="Docker Desktop Path:" Margin="0,0,0,0"/>
+                <ui:TextBox x:Name="TxtDockerPath" Text="{Binding Config.DockerDesktopPath, Mode=TwoWay}" Margin="0,5,0,10"/>
+                
+                <CheckBox Content="Enable Logging" IsChecked="{Binding Config.Logging.Enabled, Mode=TwoWay}" Margin="0,0,0,5"/>
+                <CheckBox Content="Auto-start WSL on Launch" IsChecked="{Binding Config.AutoStartWslOnLaunch, Mode=TwoWay}" Margin="0,0,0,5"/>
+                <CheckBox Content="Auto-start Docker on Launch" IsChecked="{Binding Config.AutoStartDockerOnLaunch, Mode=TwoWay}" Margin="0,0,0,15"/>
+                
+                <TextBlock Text="Polling Interval (Seconds):" Margin="0,0,0,5"/>
+                <Slider Minimum="1" Maximum="10" Value="{Binding Config.Dashboard.PollIntervalSeconds, Mode=TwoWay}" TickFrequency="1" IsSnapToTickEnabled="True" Margin="0,0,0,10"/>
+                <TextBlock Text="{Binding Config.Dashboard.PollIntervalSeconds, StringFormat='{}Current: {0}s'}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,-5,0,15"/>
+
+                <ui:Button Content="Save &amp; Apply" Appearance="Primary" Click="SaveSettings_Click" HorizontalAlignment="Right"/>
+            </StackPanel>
+        </ui:Flyout>
+
+        <!-- Main Content -->
+        <Grid Grid.Row="1" Margin="20,0,20,20">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="55*"/>
+                <ColumnDefinition Width="45*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left Column: Dashboard & Controls -->
+            <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" Margin="0,0,20,0">
+                <StackPanel>
+                    <!-- Dashboard Section (4 Tiles) -->
+                <Grid Margin="0,0,0,10">
+                    <TextBlock Text="Dashboard" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <ui:Button Appearance="Transparent" Icon="{ui:SymbolIcon Settings24}" Click="OpenSettings_Click" ToolTip="Settings" HorizontalAlignment="Right"/>
+                </Grid>
+                <Grid Margin="0,0,0,20">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Tile 1: Docker -->
+                        <ui:Card Grid.Row="0" Grid.Column="0" Margin="0,0,5,5" Padding="15">
+                            <StackPanel>
+                                <TextBlock Text="Docker Status" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                    <ui:SymbolIcon Symbol="Server24" Foreground="{Binding DockerStatusColor, FallbackValue=Gray}" FontSize="20" Margin="0,0,5,0"/>
+                                    <TextBlock Text="{Binding DockerStatusText, FallbackValue='Checking...'}" VerticalAlignment="Center" FontWeight="Medium"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <!-- Tile 2: WSL -->
+                        <ui:Card Grid.Row="0" Grid.Column="1" Margin="5,0,0,5" Padding="15">
+                            <StackPanel>
+                                <TextBlock Text="WSL Engine" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                    <ui:SymbolIcon Symbol="Box24" Foreground="{Binding WslStatusColor, FallbackValue=Gray}" FontSize="20" Margin="0,0,5,0"/>
+                                    <TextBlock Text="{Binding WslStatusText, FallbackValue='Checking...'}" VerticalAlignment="Center" FontWeight="Medium"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <!-- Tile 3: Containers -->
+                        <ui:Card Grid.Row="1" Grid.Column="0" Margin="0,5,5,0" Padding="15">
+                            <StackPanel>
+                                <TextBlock Text="Running Containers" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                    <ui:SymbolIcon Symbol="AppsList24" Foreground="#FFB900" FontSize="20" Margin="0,0,5,0"/>
+                                    <TextBlock Text="{Binding ContainerText, FallbackValue='0 / 0'}" VerticalAlignment="Center" FontWeight="Medium"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:Card>
+
+                        <!-- Tile 4: VMMem -->
+                        <ui:Card Grid.Row="1" Grid.Column="1" Margin="5,5,0,0" Padding="15">
+                            <StackPanel>
+                                <TextBlock Text="VMMem RAM Usage" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                    <ui:SymbolIcon Symbol="Memory24" Foreground="#8764B8" FontSize="20" Margin="0,0,5,0"/>
+                                    <TextBlock Text="{Binding RamUsageText, FallbackValue='0 MB'}" VerticalAlignment="Center" FontWeight="Medium"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </ui:Card>
+                    </Grid>
+
+                    <!-- Actions Section -->
+                    <TextBlock Text="Control Panel" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,10"/>
+                    
+                    <ui:CardAction Click="WslToggle_Click" Margin="0,0,0,10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:SymbolIcon Symbol="{Binding WslCardIcon}" Grid.Column="0" FontSize="32" Foreground="{Binding WslCardAccent}" Margin="0,0,15,0" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding WslCardLabel}" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding WslCardSub}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </ui:CardAction>
+
+                    <ui:CardAction Click="DockerToggle_Click" Margin="0,0,0,10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:SymbolIcon Symbol="{Binding DockerCardIcon}" Grid.Column="0" FontSize="32" Foreground="{Binding DockerCardAccent}" Margin="0,0,15,0" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding DockerCardLabel}" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="{Binding DockerCardSub}" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </ui:CardAction>
+
+                    <ui:CardAction Click="NuclearShutdown_Click" Margin="0,0,0,10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <ui:SymbolIcon Symbol="Power24" Grid.Column="0" FontSize="32" Foreground="#D13438" Margin="0,0,15,0" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock Text="Nuclear Shutdown" FontSize="16" FontWeight="SemiBold"/>
+                                <TextBlock Text="Purge all Docker + WSL processes" Foreground="{DynamicResource TextFillColorSecondaryBrush}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                    </ui:CardAction>
+
+                    <!-- Status Feedback -->
+                    <ui:InfoBar x:Name="StatusInfoBar" IsOpen="False" Title="Status" Message="Ready" Margin="0,10,0,0"/>
+                </StackPanel>
+            </ScrollViewer>
+
+            <!-- Right Column: Live Terminal -->
+            <Grid Grid.Column="1">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <Grid Grid.Row="0" Margin="0,0,0,10">
+                    <TextBlock Text="Live Terminal" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <ui:Button Appearance="Transparent" Icon="{ui:SymbolIcon Delete24}" Click="ClearTerminal_Click" ToolTip="Clear Log" HorizontalAlignment="Right"/>
+                </Grid>
+
+                <Border Grid.Row="1" Background="#1E1E1E" CornerRadius="8" Padding="10">
+                    <ScrollViewer x:Name="TerminalScrollViewer" VerticalScrollBarVisibility="Auto">
+                        <TextBlock x:Name="TxtTerminal" Foreground="#CCCCCC" FontFamily="Consolas" TextWrapping="Wrap" FontSize="12"/>
+                    </ScrollViewer>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</ui:FluentWindow>
