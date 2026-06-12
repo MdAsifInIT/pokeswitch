@@ -1,0 +1,35 @@
+name: Build & Package Installer
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '10.0.x' # Targeting .NET 10 as specified in the project
+
+    - name: Publish Single Executable
+      run: |
+        dotnet publish PokeSwitch/PokeSwitch.csproj -c Release -r win-x64 --self-contained true
+
+    - name: Compile Inno Setup Installer
+      run: |
+        # Inno Setup is pre-installed on GitHub Actions windows-latest runners
+        iscc PokeSwitch.iss
+
+    - name: Upload Installer Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: PokeSwitch-Installer
+        path: Output/PokeSwitchSetup.exe
