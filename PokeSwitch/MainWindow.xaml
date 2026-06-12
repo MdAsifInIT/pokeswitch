@@ -16,7 +16,7 @@
         <!-- Title Bar -->
         <ui:TitleBar Title="PokeSwitch" Grid.Row="0" Margin="0,0,0,10">
             <ui:TitleBar.Icon>
-                <ui:ImageIcon Source="pack://application:,,,/pokemon_go_play_game_charcter_icon-icons.com_69165.ico" />
+                <ui:ImageIcon Source="pack://application:,,,/Resources/PokeSwitch.ico" />
             </ui:TitleBar.Icon>
         </ui:TitleBar>
 

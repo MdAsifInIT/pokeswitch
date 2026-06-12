@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <ApplicationIcon>..\pokemon_go_play_game_charcter_icon-icons.com_69165.ico</ApplicationIcon>
+    <ApplicationIcon>Resources\PokeSwitch.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
@@ -18,7 +18,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Resource Include="..\pokemon_go_play_game_charcter_icon-icons.com_69165.ico" />
+    <Resource Include="Resources\PokeSwitch.ico" />
   </ItemGroup>
 
 </Project>
