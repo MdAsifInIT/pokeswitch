@@ -16,7 +16,7 @@
         <!-- Title Bar -->
         <ui:TitleBar Title="PokeSwitch" Grid.Row="0" Margin="0,0,0,10">
             <ui:TitleBar.Icon>
-                <Image Source="pack://application:,,,/pokemon_go_play_game_charcter_icon-icons.com_69165.ico" Width="18" Height="18"/>
+                <ui:ImageIcon Source="pack://application:,,,/pokemon_go_play_game_charcter_icon-icons.com_69165.ico" />
             </ui:TitleBar.Icon>
         </ui:TitleBar>
 
@@ -106,7 +106,7 @@
                             <StackPanel>
                                 <TextBlock Text="VMMem RAM Usage" Foreground="{DynamicResource TextFillColorSecondaryBrush}"/>
                                 <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                                    <ui:SymbolIcon Symbol="Memory24" Foreground="#8764B8" FontSize="20" Margin="0,0,5,0"/>
+                                    <ui:SymbolIcon Symbol="DeveloperBoard24" Foreground="#8764B8" FontSize="20" Margin="0,0,5,0"/>
                                     <TextBlock Text="{Binding RamUsageText, FallbackValue='0 MB'}" VerticalAlignment="Center" FontWeight="Medium"/>
                                 </StackPanel>
                             </StackPanel>

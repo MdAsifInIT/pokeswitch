@@ -64,6 +64,7 @@ namespace PokeSwitch
 
         private bool _isDockerRunning;
         private bool _isWslRunning;
+        private bool _isWslKeepAliveRunning;
 
         public MainWindow()
         {
@@ -85,7 +86,7 @@ namespace PokeSwitch
             // NotifyIcon for tray could go here if implemented, but we rely on simple minimize for now.
 
             AppendLog("Application started.");
-            UpdateDashboard();
+            _ = UpdateDashboard();
 
             if (Config.AutoStartWslOnLaunch)
             {
@@ -108,10 +109,19 @@ namespace PokeSwitch
         {
             await Task.Run(async () =>
             {
-                _isDockerRunning = _dockerManager.IsDockerDesktopRunning();
-                _isWslRunning = _dockerManager.IsWslRunning();
-                var containers = await _dockerManager.GetRunningContainerCountAsync();
-                int ram = _dockerManager.GetVmMemUsageMB();
+                var dockerTask = Task.Run(() => _dockerManager.IsDockerDesktopRunning());
+                var wslTask = Task.Run(() => _dockerManager.IsWslRunning());
+                var wslKeepAliveTask = Task.Run(() => _dockerManager.IsWslKeepAliveRunning());
+                var containersTask = _dockerManager.GetRunningContainerCountAsync();
+                var ramTask = Task.Run(() => _dockerManager.GetVmMemUsageMB());
+
+                await Task.WhenAll(dockerTask, wslTask, wslKeepAliveTask, containersTask, ramTask);
+
+                _isDockerRunning = dockerTask.Result;
+                _isWslRunning = wslTask.Result;
+                _isWslKeepAliveRunning = wslKeepAliveTask.Result;
+                var containers = containersTask.Result;
+                int ram = ramTask.Result;
 
                 Dispatcher.Invoke(() =>
                 {
@@ -142,7 +152,7 @@ namespace PokeSwitch
                     RamUsageText = ram > 0 ? $"{ram} MB" : "— (idle)";
 
                     // Update Toggle Cards
-                    if (_isWslRunning && !_isDockerRunning)
+                    if (_isWslKeepAliveRunning)
                     {
                         WslCardLabel = "Stop WSL Keep-Alive";
                         WslCardIcon = "Stop24";
@@ -212,17 +222,33 @@ namespace PokeSwitch
         {
             try
             {
-                if (_isWslRunning && !_isDockerRunning)
+                if (_isWslKeepAliveRunning)
                 {
-                    ShowInfo("Executing", "Stopping WSL...", InfoBarSeverity.Warning);
+                    ShowInfo("Executing", "Stopping WSL Keep-Alive...", InfoBarSeverity.Warning);
                     await _dockerManager.StopWslAsync(AppendLog);
-                    ShowInfo("Success", "WSL is stopped.", InfoBarSeverity.Success);
+                    
+                    bool success = false;
+                    for (int i = 0; i < 50; i++)
+                    {
+                        if (!_dockerManager.IsWslKeepAliveRunning()) { success = true; break; }
+                        await Task.Delay(200);
+                    }
+                    if (success) ShowInfo("Success", "WSL Keep-Alive is stopped.", InfoBarSeverity.Success);
+                    else ShowInfo("Warning", "Stop command sent, but WSL is taking too long to update.", InfoBarSeverity.Warning);
                 }
                 else
                 {
                     ShowInfo("Executing", "Starting WSL in Headless Mode...", InfoBarSeverity.Informational);
                     await _dockerManager.StartWslKeepAliveAsync(AppendLog);
-                    ShowInfo("Success", "WSL is now running in the background.", InfoBarSeverity.Success);
+                    
+                    bool success = false;
+                    for (int i = 0; i < 50; i++)
+                    {
+                        if (_dockerManager.IsWslKeepAliveRunning()) { success = true; break; }
+                        await Task.Delay(200);
+                    }
+                    if (success) ShowInfo("Success", "WSL Keep-Alive is now running in the background.", InfoBarSeverity.Success);
+                    else ShowInfo("Warning", "Start command sent, but WSL is taking too long to respond.", InfoBarSeverity.Warning);
                 }
                 await UpdateDashboard();
             }
@@ -241,7 +267,15 @@ namespace PokeSwitch
                 {
                     ShowInfo("Executing", "Stopping Docker and containers...", InfoBarSeverity.Warning);
                     await _dockerManager.StopDockerOnlyAsync(AppendLog);
-                    ShowInfo("Success", "Docker is stopped.", InfoBarSeverity.Success);
+                    
+                    bool success = false;
+                    for (int i = 0; i < 40; i++)
+                    {
+                        if (!_dockerManager.IsDockerDesktopRunning()) { success = true; break; }
+                        await Task.Delay(250);
+                    }
+                    if (success) ShowInfo("Success", "Docker is stopped.", InfoBarSeverity.Success);
+                    else ShowInfo("Warning", "Docker stop command sent, but processes are taking too long to exit.", InfoBarSeverity.Warning);
                 }
                 else
                 {
@@ -262,7 +296,20 @@ namespace PokeSwitch
             try
             {
                 await _dockerManager.NuclearShutdownAsync(AppendLog);
-                ShowInfo("Success", "Desktop Mode Active. RAM and Battery saved!", InfoBarSeverity.Success);
+                
+                bool success = false;
+                for (int i = 0; i < 60; i++)
+                {
+                    if (!_dockerManager.IsDockerDesktopRunning() && !_dockerManager.IsWslRunning() && !_dockerManager.IsWslKeepAliveRunning())
+                    {
+                        success = true;
+                        break;
+                    }
+                    await Task.Delay(250);
+                }
+                if (success) ShowInfo("Success", "Desktop Mode Active. RAM and Battery saved!", InfoBarSeverity.Success);
+                else ShowInfo("Warning", "Nuclear shutdown sent, but some processes are taking a long time to exit.", InfoBarSeverity.Warning);
+                
                 await UpdateDashboard();
             }
             catch (Exception ex)

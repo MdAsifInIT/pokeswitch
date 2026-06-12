@@ -19,11 +19,12 @@ namespace PokeSwitch.Services
         {
             await Task.Run(() =>
             {
-                onLog($"Starting WSL Keep-Alive for distro: {_config.WslDistroName}...");
+                string distro = GetEffectiveDistroName();
+                onLog($"Starting WSL Keep-Alive for distro: {distro}...");
                 var psi = new ProcessStartInfo
                 {
                     FileName = "wsl.exe",
-                    Arguments = $"-d {_config.WslDistroName} -e sleep infinity",
+                    Arguments = $"-d {distro} -e sleep infinity",
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
@@ -40,17 +41,18 @@ namespace PokeSwitch.Services
         {
             await Task.Run(() =>
             {
-                onLog($"Stopping WSL distro: {_config.WslDistroName}...");
+                string distro = GetEffectiveDistroName();
+                onLog($"Stopping WSL distro: {distro}...");
                 var psi = new ProcessStartInfo
                 {
                     FileName = "wsl",
-                    Arguments = $"--terminate {_config.WslDistroName}",
+                    Arguments = $"-d {distro} -e pkill -f \"sleep infinity\"",
                     UseShellExecute = false,
                     CreateNoWindow = true
                 };
                 using var process = Process.Start(psi);
                 process?.WaitForExit();
-                onLog($"WSL {_config.WslDistroName} terminated.");
+                onLog($"WSL {distro} terminated.");
             });
         }
 
@@ -72,7 +74,9 @@ namespace PokeSwitch.Services
                 }
 
                 onLog("Waiting for Docker Daemon to respond...");
-                while (true)
+                int maxRetries = 30; // 60 seconds timeout
+                int retries = 0;
+                while (retries < maxRetries)
                 {
                     var daemonPsi = new ProcessStartInfo
                     {
@@ -85,11 +89,18 @@ namespace PokeSwitch.Services
                     };
 
                     using var process = Process.Start(daemonPsi);
-                    process?.WaitForExit();
+                    process?.WaitForExit(2000);
                     if (process?.ExitCode == 0)
                     {
                         onLog("Docker daemon is responding.");
                         break;
+                    }
+                    
+                    retries++;
+                    if (retries >= maxRetries)
+                    {
+                        onLog("Error: Timed out waiting for Docker Daemon. The application might be stuck or updating.");
+                        throw new TimeoutException("Docker Daemon response timeout.");
                     }
                     await Task.Delay(2000);
                 }
@@ -233,6 +244,34 @@ namespace PokeSwitch.Services
                 Arguments = "-l --running",
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                StandardOutputEncoding = System.Text.Encoding.Unicode
+            };
+
+            try
+            {
+                using var process = Process.Start(psi);
+                if (process == null) return false;
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit(2000);
+                string distro = GetEffectiveDistroName();
+                return output.Contains(distro) || output.Contains("docker-desktop");
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public bool IsWslKeepAliveRunning()
+        {
+            string distro = GetEffectiveDistroName();
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wsl",
+                Arguments = $"-d {distro} -e pgrep -f \"sleep infinity\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
                 RedirectStandardOutput = true
             };
 
@@ -241,8 +280,8 @@ namespace PokeSwitch.Services
                 using var process = Process.Start(psi);
                 if (process == null) return false;
                 string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                return output.Contains(_config.WslDistroName) || output.Contains("docker-desktop");
+                process.WaitForExit(2000);
+                return !string.IsNullOrWhiteSpace(output);
             }
             catch
             {
@@ -256,28 +295,32 @@ namespace PokeSwitch.Services
 
             try
             {
-                int running = 0;
-                int total = 0;
-                
-                var psiRunning = new ProcessStartInfo { FileName = "docker", Arguments = "ps -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-                using var pRunning = Process.Start(psiRunning);
-                if (pRunning != null)
+                var runTask = Task.Run(async () =>
                 {
+                    var psiRunning = new ProcessStartInfo { FileName = "docker", Arguments = "ps -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                    using var pRunning = Process.Start(psiRunning);
+                    if (pRunning == null) return 0;
                     string outRunning = await pRunning.StandardOutput.ReadToEndAsync();
-                    pRunning.WaitForExit();
-                    running = outRunning.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
-                }
+                    pRunning.WaitForExit(5000);
+                    return outRunning.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                });
 
-                var psiTotal = new ProcessStartInfo { FileName = "docker", Arguments = "ps -a -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-                using var pTotal = Process.Start(psiTotal);
-                if (pTotal != null)
+                var totalTask = Task.Run(async () =>
                 {
+                    var psiTotal = new ProcessStartInfo { FileName = "docker", Arguments = "ps -a -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+                    using var pTotal = Process.Start(psiTotal);
+                    if (pTotal == null) return 0;
                     string outTotal = await pTotal.StandardOutput.ReadToEndAsync();
-                    pTotal.WaitForExit();
-                    total = outTotal.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
-                }
+                    pTotal.WaitForExit(5000);
+                    return outTotal.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                });
 
-                return (running, total);
+                var allTask = Task.WhenAll(runTask, totalTask);
+                if (await Task.WhenAny(allTask, Task.Delay(10000)) == allTask)
+                {
+                    return (runTask.Result, totalTask.Result);
+                }
+                return (0, 0);
             }
             catch
             {
@@ -300,6 +343,64 @@ namespace PokeSwitch.Services
             catch
             {
                 return 0;
+            }
+        }
+
+        public string GetEffectiveDistroName()
+        {
+            var configured = _config.WslDistroName;
+            var installed = GetInstalledDistros();
+
+            // 1. If configured matches exactly, use it
+            if (installed.Contains(configured, StringComparer.OrdinalIgnoreCase))
+            {
+                return configured;
+            }
+
+            // 2. If configured is a substring of any installed distro, use the first matching installed distro
+            var match = installed.FirstOrDefault(d => d.Contains(configured, StringComparison.OrdinalIgnoreCase));
+            if (match != null)
+            {
+                return match;
+            }
+
+            // 3. Fallback to the first installed distro that is not docker-desktop/docker-desktop-data
+            var fallback = installed.FirstOrDefault(d => !d.Equals("docker-desktop", StringComparison.OrdinalIgnoreCase) && !d.Equals("docker-desktop-data", StringComparison.OrdinalIgnoreCase));
+            if (fallback != null)
+            {
+                return fallback;
+            }
+
+            // 4. Ultimate fallback to configured value
+            return configured;
+        }
+
+        public string[] GetInstalledDistros()
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "wsl",
+                Arguments = "-l -q",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                StandardOutputEncoding = System.Text.Encoding.Unicode
+            };
+
+            try
+            {
+                using var process = Process.Start(psi);
+                if (process == null) return Array.Empty<string>();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                return output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                             .Select(s => s.Trim())
+                             .Where(s => !string.IsNullOrEmpty(s))
+                             .ToArray();
+            }
+            catch
+            {
+                return Array.Empty<string>();
             }
         }
     }
