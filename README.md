@@ -44,7 +44,7 @@ pokeswitch/
 
 ## Configuration (`pokeswitch-config.json`)
 
-The application is configured using a `pokeswitch-config.json` file. Here is the default schema:
+The application is configured using a `pokeswitch-config.json` file located in the same directory as the executable. If the file does not exist, a default configuration will be created automatically upon the first launch. Here is the default schema:
 
 ```json
 {
