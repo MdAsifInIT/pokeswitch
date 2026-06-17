@@ -15,6 +15,7 @@ PokeSwitch is a lightweight, clean WPF utility designed to seamlessly toggle Doc
 - **Boot Docker Engine**: Full spin-up of Docker Desktop, waiting for the daemon to respond, and automatically waking up all existing containers.
 - **Stop Docker Engine**: Gracefully stops all active containers and shuts down Docker Desktop processes.
 - **Nuclear Shutdown**: Gracefully stops containers, shuts down Docker, and purges the WSL2 subsystem (`wsl --shutdown`) to immediately reclaim RAM.
+- **NVIDIA GPU Toggle**: Enables or disables the NVIDIA RTX 3050 display device from the GUI, refusing to act if no matching device or multiple matching devices are found.
 
 ---
 

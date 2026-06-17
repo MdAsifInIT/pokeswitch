@@ -1,407 +1,475 @@
-using System;
 using System.Diagnostics;
-using System.Linq;
-using System.Threading.Tasks;
+using System.IO;
+using System.Text;
 using PokeSwitch.Models;
 
-namespace PokeSwitch.Services
+namespace PokeSwitch.Services;
+
+public interface IDockerManager
 {
-    public class DockerManager
+    Task StartWslKeepAliveAsync(Action<string> onLog, CancellationToken cancellationToken = default);
+    Task StopWslAsync(Action<string> onLog, CancellationToken cancellationToken = default);
+    Task BootDockerEngineAsync(Action<string> onLog, CancellationToken cancellationToken = default);
+    Task StopDockerOnlyAsync(Action<string> onLog, CancellationToken cancellationToken = default);
+    Task NuclearShutdownAsync(Action<string> onLog, CancellationToken cancellationToken = default);
+    bool IsDockerDesktopRunning();
+    bool IsWslRunning();
+    bool IsWslKeepAliveRunning();
+    Task<(int running, int total)> GetRunningContainerCountAsync(CancellationToken cancellationToken = default);
+    int GetVmMemUsageMB();
+}
+
+public class DockerManager : IDockerManager
+{
+    private const int ContainerBatchSize = 50;
+    private static readonly TimeSpan ShortCommandTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ContainerCommandTimeout = TimeSpan.FromMinutes(2);
+
+    private readonly AppConfig _config;
+    private readonly IProcessRunner _processRunner;
+
+    public DockerManager(AppConfig config, IProcessRunner? processRunner = null)
     {
-        private readonly AppConfig _config;
+        _config = ConfigManager.Normalize(config);
+        _processRunner = processRunner ?? new ProcessRunner();
+    }
 
-        public DockerManager(AppConfig config)
+    public Task StartWslKeepAliveAsync(Action<string> onLog, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        string distro = GetEffectiveDistroName();
+        onLog($"Starting WSL Keep-Alive for distro: {distro}...");
+
+        var psi = CreateStartInfo("wsl.exe");
+        psi.WindowStyle = ProcessWindowStyle.Hidden;
+        psi.ArgumentList.Add("-d");
+        psi.ArgumentList.Add(distro);
+        psi.ArgumentList.Add("-e");
+        psi.ArgumentList.Add("sleep");
+        psi.ArgumentList.Add("infinity");
+
+        using Process process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start WSL keep-alive.");
+
+        onLog($"WSL started with PID: {process.Id}");
+        return Task.CompletedTask;
+    }
+
+    public async Task StopWslAsync(Action<string> onLog, CancellationToken cancellationToken = default)
+    {
+        string distro = GetEffectiveDistroName();
+        onLog($"Stopping WSL distro: {distro}...");
+
+        var psi = CreateStartInfo("wsl");
+        psi.ArgumentList.Add("-d");
+        psi.ArgumentList.Add(distro);
+        psi.ArgumentList.Add("-e");
+        psi.ArgumentList.Add("pkill");
+        psi.ArgumentList.Add("-f");
+        psi.ArgumentList.Add("sleep infinity");
+
+        ProcessResult result = await _processRunner.RunAsync(psi, CommandTimeout, cancellationToken).ConfigureAwait(false);
+        if (result.TimedOut)
         {
-            _config = config;
+            onLog($"Timed out stopping WSL keep-alive for {distro}.");
+            return;
         }
 
-        public async Task StartWslKeepAliveAsync(Action<string> onLog)
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
         {
-            await Task.Run(() =>
-            {
-                string distro = GetEffectiveDistroName();
-                onLog($"Starting WSL Keep-Alive for distro: {distro}...");
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "wsl.exe",
-                    Arguments = $"-d {distro} -e sleep infinity",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-                var process = Process.Start(psi);
-                if (process != null)
-                {
-                    onLog($"WSL started with PID: {process.Id}");
-                }
-            });
+            onLog($"WSL stop returned {result.ExitCode}: {result.StandardError.Trim()}");
         }
 
-        public async Task StopWslAsync(Action<string> onLog)
+        onLog($"WSL {distro} terminated.");
+    }
+
+    public async Task BootDockerEngineAsync(Action<string> onLog, CancellationToken cancellationToken = default)
+    {
+        onLog("Starting Docker Desktop...");
+
+        if (!IsDockerDesktopRunning())
         {
-            await Task.Run(() =>
-            {
-                string distro = GetEffectiveDistroName();
-                onLog($"Stopping WSL distro: {distro}...");
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "wsl",
-                    Arguments = $"-d {distro} -e pkill -f \"sleep infinity\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var process = Process.Start(psi);
-                process?.WaitForExit();
-                onLog($"WSL {distro} terminated.");
-            });
+            StartDockerDesktop();
         }
 
-        public async Task BootDockerEngineAsync(Action<string> onLog)
+        onLog("Waiting for Docker Daemon to respond...");
+        const int maxRetries = 30;
+        for (int retry = 0; retry < maxRetries; retry++)
         {
-            await Task.Run(async () =>
+            if (await IsDockerDaemonReadyAsync(cancellationToken).ConfigureAwait(false))
             {
-                onLog("Starting Docker Desktop...");
-                
-                if (!IsDockerDesktopRunning())
-                {
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = _config.DockerDesktopPath,
-                        UseShellExecute = true,
-                        WindowStyle = ProcessWindowStyle.Minimized
-                    };
-                    Process.Start(psi);
-                }
+                onLog("Docker daemon is responding.");
+                break;
+            }
 
-                onLog("Waiting for Docker Daemon to respond...");
-                int maxRetries = 30; // 60 seconds timeout
-                int retries = 0;
-                while (retries < maxRetries)
-                {
-                    var daemonPsi = new ProcessStartInfo
-                    {
-                        FileName = "docker",
-                        Arguments = "info",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true
-                    };
+            if (retry == maxRetries - 1)
+            {
+                onLog("Error: Timed out waiting for Docker Daemon. The application might be stuck or updating.");
+                throw new TimeoutException("Docker Daemon response timeout.");
+            }
 
-                    using var process = Process.Start(daemonPsi);
-                    process?.WaitForExit(2000);
-                    if (process?.ExitCode == 0)
-                    {
-                        onLog("Docker daemon is responding.");
-                        break;
-                    }
-                    
-                    retries++;
-                    if (retries >= maxRetries)
-                    {
-                        onLog("Error: Timed out waiting for Docker Daemon. The application might be stuck or updating.");
-                        throw new TimeoutException("Docker Daemon response timeout.");
-                    }
-                    await Task.Delay(2000);
-                }
-
-                onLog("Waking up all containers...");
-                var psPsi = new ProcessStartInfo
-                {
-                    FileName = "docker",
-                    Arguments = "ps -a -q",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                };
-
-                using var psProcess = Process.Start(psPsi);
-                if (psProcess != null)
-                {
-                    string allContainers = await psProcess.StandardOutput.ReadToEndAsync();
-                    psProcess.WaitForExit();
-
-                    var containerIds = allContainers.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (containerIds.Length > 0)
-                    {
-                        onLog($"Found {containerIds.Length} stopped containers. Starting them...");
-                        var startPsi = new ProcessStartInfo
-                        {
-                            FileName = "docker",
-                            Arguments = $"start {string.Join(" ", containerIds)}",
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-                        using var startProcess = Process.Start(startPsi);
-                        startProcess?.WaitForExit();
-                    }
-                    else
-                    {
-                        onLog("No containers to wake up.");
-                    }
-                }
-
-                onLog("✅ Boot complete. Docker engine and containers are online.");
-            });
+            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task StopDockerOnlyAsync(Action<string> onLog)
+        onLog("Waking up all containers...");
+        string[] containerIds = await GetContainerIdsAsync(allContainers: true, cancellationToken).ConfigureAwait(false);
+        if (containerIds.Length == 0)
         {
-            await Task.Run(async () =>
-            {
-                onLog("Stopping active containers gracefully...");
-                var psPsi = new ProcessStartInfo
-                {
-                    FileName = "docker",
-                    Arguments = "ps -q",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                };
-
-                try
-                {
-                    using var psProcess = Process.Start(psPsi);
-                    if (psProcess != null)
-                    {
-                        string activeContainers = await psProcess.StandardOutput.ReadToEndAsync();
-                        psProcess.WaitForExit();
-
-                        var containerIds = activeContainers.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-                        if (containerIds.Length > 0)
-                        {
-                            onLog($"Stopping {containerIds.Length} containers...");
-                            var stopPsi = new ProcessStartInfo
-                            {
-                                FileName = "docker",
-                                Arguments = $"stop {string.Join(" ", containerIds)}",
-                                UseShellExecute = false,
-                                CreateNoWindow = true
-                            };
-                            using var stopProcess = Process.Start(stopPsi);
-                            stopProcess?.WaitForExit();
-                        }
-                    }
-                }
-                catch { onLog("Docker CLI unavailable, skipping container stop."); }
-
-                onLog("Shutting down Docker Desktop processes...");
-                KillProcessByName("Docker Desktop", onLog);
-                KillProcessByName("com.docker.backend", onLog);
-                onLog("Docker Engine stopped.");
-            });
+            onLog("No containers to wake up.");
+        }
+        else
+        {
+            onLog($"Found {containerIds.Length} containers. Starting them...");
+            await RunDockerContainerCommandInBatchesAsync("start", containerIds, onLog, cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task NuclearShutdownAsync(Action<string> onLog)
+        onLog("Boot complete. Docker engine and containers are online.");
+    }
+
+    public async Task StopDockerOnlyAsync(Action<string> onLog, CancellationToken cancellationToken = default)
+    {
+        onLog("Stopping active containers gracefully...");
+
+        try
         {
-            await Task.Run(async () =>
+            string[] containerIds = await GetContainerIdsAsync(allContainers: false, cancellationToken).ConfigureAwait(false);
+            if (containerIds.Length > 0)
             {
-                await StopDockerOnlyAsync(onLog);
-
-                onLog("Purging WSL2 VMMem subsystem from RAM (wsl --shutdown)...");
-                var wslPsi = new ProcessStartInfo
-                {
-                    FileName = "wsl",
-                    Arguments = "--shutdown",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-                using var wslProcess = Process.Start(wslPsi);
-                wslProcess?.WaitForExit();
-
-                onLog("✅ Nuclear Shutdown complete. RAM and Battery saved!");
-            });
-        }
-
-        private void KillProcessByName(string processName, Action<string> onLog)
-        {
-            var processes = Process.GetProcessesByName(processName);
-            foreach (var process in processes)
-            {
-                try
-                {
-                    onLog($"Killing process {processName} (PID: {process.Id})...");
-                    process.Kill();
-                    process.WaitForExit();
-                }
-                catch (Exception ex)
-                {
-                    onLog($"Failed to kill {processName}: {ex.Message}");
-                }
+                onLog($"Stopping {containerIds.Length} containers...");
+                await RunDockerContainerCommandInBatchesAsync("stop", containerIds, onLog, cancellationToken).ConfigureAwait(false);
             }
         }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            onLog($"Docker CLI unavailable, skipping container stop: {ex.Message}");
+        }
 
-        public bool IsDockerDesktopRunning()
+        onLog("Shutting down Docker Desktop processes...");
+        await StopProcessByNameAsync("Docker Desktop", onLog, cancellationToken).ConfigureAwait(false);
+        await StopProcessByNameAsync("com.docker.backend", onLog, cancellationToken).ConfigureAwait(false);
+        onLog("Docker Engine stopped.");
+    }
+
+    public async Task NuclearShutdownAsync(Action<string> onLog, CancellationToken cancellationToken = default)
+    {
+        await StopDockerOnlyAsync(onLog, cancellationToken).ConfigureAwait(false);
+
+        onLog("Purging WSL2 VMMem subsystem from RAM (wsl --shutdown)...");
+        var psi = CreateStartInfo("wsl");
+        psi.ArgumentList.Add("--shutdown");
+
+        ProcessResult result = await _processRunner.RunAsync(psi, CommandTimeout, cancellationToken).ConfigureAwait(false);
+        if (result.TimedOut)
+        {
+            onLog("Timed out waiting for wsl --shutdown.");
+            return;
+        }
+
+        if (result.ExitCode != 0 && !string.IsNullOrWhiteSpace(result.StandardError))
+        {
+            onLog($"wsl --shutdown returned {result.ExitCode}: {result.StandardError.Trim()}");
+        }
+
+        onLog("Nuclear Shutdown complete. RAM and Battery saved!");
+    }
+
+    public bool IsDockerDesktopRunning()
+    {
+        try
         {
             return Process.GetProcessesByName("Docker Desktop").Any();
         }
-
-        public bool IsWslRunning()
+        catch
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "wsl",
-                Arguments = "-l --running",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                StandardOutputEncoding = System.Text.Encoding.Unicode
-            };
-
-            try
-            {
-                using var process = Process.Start(psi);
-                if (process == null) return false;
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit(2000);
-                string distro = GetEffectiveDistroName();
-                return output.Contains(distro) || output.Contains("docker-desktop");
-            }
-            catch
-            {
-                return false;
-            }
+            return false;
         }
+    }
 
-        public bool IsWslKeepAliveRunning()
+    public bool IsWslRunning()
+    {
+        try
+        {
+            var psi = CreateStartInfo("wsl");
+            psi.StandardOutputEncoding = Encoding.Unicode;
+            psi.ArgumentList.Add("-l");
+            psi.ArgumentList.Add("--running");
+
+            ProcessResult result = RunProcessSync(psi, ShortCommandTimeout);
+            string distro = GetEffectiveDistroName();
+            return result.ExitCode == 0
+                && (result.StandardOutput.Contains(distro, StringComparison.OrdinalIgnoreCase)
+                    || result.StandardOutput.Contains("docker-desktop", StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public bool IsWslKeepAliveRunning()
+    {
+        try
         {
             string distro = GetEffectiveDistroName();
-            var psi = new ProcessStartInfo
-            {
-                FileName = "wsl",
-                Arguments = $"-d {distro} -e pgrep -f \"sleep infinity\"",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true
-            };
+            var psi = CreateStartInfo("wsl");
+            psi.ArgumentList.Add("-d");
+            psi.ArgumentList.Add(distro);
+            psi.ArgumentList.Add("-e");
+            psi.ArgumentList.Add("pgrep");
+            psi.ArgumentList.Add("-f");
+            psi.ArgumentList.Add("sleep infinity");
 
-            try
-            {
-                using var process = Process.Start(psi);
-                if (process == null) return false;
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit(2000);
-                return !string.IsNullOrWhiteSpace(output);
-            }
-            catch
-            {
-                return false;
-            }
+            ProcessResult result = RunProcessSync(psi, ShortCommandTimeout);
+            return result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.StandardOutput);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<(int running, int total)> GetRunningContainerCountAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsDockerDesktopRunning())
+        {
+            return (0, 0);
         }
 
-        public async Task<(int running, int total)> GetRunningContainerCountAsync()
+        try
         {
-            if (!IsDockerDesktopRunning()) return (0, 0);
+            Task<string[]> runningTask = GetContainerIdsAsync(allContainers: false, cancellationToken);
+            Task<string[]> totalTask = GetContainerIdsAsync(allContainers: true, cancellationToken);
 
-            try
-            {
-                var runTask = Task.Run(async () =>
-                {
-                    var psiRunning = new ProcessStartInfo { FileName = "docker", Arguments = "ps -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-                    using var pRunning = Process.Start(psiRunning);
-                    if (pRunning == null) return 0;
-                    string outRunning = await pRunning.StandardOutput.ReadToEndAsync();
-                    pRunning.WaitForExit(5000);
-                    return outRunning.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
-                });
-
-                var totalTask = Task.Run(async () =>
-                {
-                    var psiTotal = new ProcessStartInfo { FileName = "docker", Arguments = "ps -a -q", UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-                    using var pTotal = Process.Start(psiTotal);
-                    if (pTotal == null) return 0;
-                    string outTotal = await pTotal.StandardOutput.ReadToEndAsync();
-                    pTotal.WaitForExit(5000);
-                    return outTotal.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).Length;
-                });
-
-                var allTask = Task.WhenAll(runTask, totalTask);
-                if (await Task.WhenAny(allTask, Task.Delay(10000)) == allTask)
-                {
-                    return (runTask.Result, totalTask.Result);
-                }
-                return (0, 0);
-            }
-            catch
-            {
-                return (0, 0);
-            }
+            await Task.WhenAll(runningTask, totalTask).ConfigureAwait(false);
+            return (runningTask.Result.Length, totalTask.Result.Length);
         }
-
-        public int GetVmMemUsageMB()
+        catch
         {
-            try
-            {
-                var vmmem = Process.GetProcessesByName("vmmem").FirstOrDefault() ?? Process.GetProcessesByName("vmmemWSL").FirstOrDefault();
-                if (vmmem != null)
-                {
-                    // WorkingSet64 is in bytes, convert to MB
-                    return (int)(vmmem.WorkingSet64 / (1024 * 1024));
-                }
-                return 0;
-            }
-            catch
-            {
-                return 0;
-            }
+            return (0, 0);
         }
+    }
 
-        public string GetEffectiveDistroName()
+    public int GetVmMemUsageMB()
+    {
+        try
         {
-            var configured = _config.WslDistroName;
-            var installed = GetInstalledDistros();
+            using Process? vmmem = Process.GetProcessesByName("vmmem").FirstOrDefault()
+                ?? Process.GetProcessesByName("vmmemWSL").FirstOrDefault();
 
-            // 1. If configured matches exactly, use it
-            if (installed.Contains(configured, StringComparer.OrdinalIgnoreCase))
-            {
-                return configured;
-            }
+            return vmmem == null ? 0 : (int)(vmmem.WorkingSet64 / (1024 * 1024));
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
-            // 2. If configured is a substring of any installed distro, use the first matching installed distro
-            var match = installed.FirstOrDefault(d => d.Contains(configured, StringComparison.OrdinalIgnoreCase));
-            if (match != null)
-            {
-                return match;
-            }
+    public string GetEffectiveDistroName()
+    {
+        string configured = _config.WslDistroName;
+        string[] installed = GetInstalledDistros();
 
-            // 3. Fallback to the first installed distro that is not docker-desktop/docker-desktop-data
-            var fallback = installed.FirstOrDefault(d => !d.Equals("docker-desktop", StringComparison.OrdinalIgnoreCase) && !d.Equals("docker-desktop-data", StringComparison.OrdinalIgnoreCase));
-            if (fallback != null)
-            {
-                return fallback;
-            }
-
-            // 4. Ultimate fallback to configured value
+        if (installed.Contains(configured, StringComparer.OrdinalIgnoreCase))
+        {
             return configured;
         }
 
-        public string[] GetInstalledDistros()
+        string? match = installed.FirstOrDefault(d => d.Contains(configured, StringComparison.OrdinalIgnoreCase));
+        if (match != null)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = "wsl",
-                Arguments = "-l -q",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                StandardOutputEncoding = System.Text.Encoding.Unicode
-            };
+            return match;
+        }
 
-            try
-            {
-                using var process = Process.Start(psi);
-                if (process == null) return Array.Empty<string>();
-                string output = process.StandardOutput.ReadToEnd();
-                process.WaitForExit();
-                return output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                             .Select(s => s.Trim())
-                             .Where(s => !string.IsNullOrEmpty(s))
-                             .ToArray();
-            }
-            catch
+        string? fallback = installed.FirstOrDefault(d =>
+            !d.Equals("docker-desktop", StringComparison.OrdinalIgnoreCase)
+            && !d.Equals("docker-desktop-data", StringComparison.OrdinalIgnoreCase));
+
+        return fallback ?? configured;
+    }
+
+    public string[] GetInstalledDistros()
+    {
+        try
+        {
+            var psi = CreateStartInfo("wsl");
+            psi.StandardOutputEncoding = Encoding.Unicode;
+            psi.ArgumentList.Add("-l");
+            psi.ArgumentList.Add("-q");
+
+            ProcessResult result = RunProcessSync(psi, ShortCommandTimeout);
+            if (result.ExitCode != 0 || result.TimedOut)
             {
                 return Array.Empty<string>();
             }
+
+            return SplitLines(result.StandardOutput);
         }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private void StartDockerDesktop()
+    {
+        if (!File.Exists(_config.DockerDesktopPath))
+        {
+            throw new FileNotFoundException("Docker Desktop executable was not found.", _config.DockerDesktopPath);
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = _config.DockerDesktopPath,
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Minimized
+        };
+
+        Process.Start(psi);
+    }
+
+    private async Task<bool> IsDockerDaemonReadyAsync(CancellationToken cancellationToken)
+    {
+        var psi = CreateStartInfo("docker");
+        psi.ArgumentList.Add("info");
+
+        ProcessResult result = await _processRunner.RunAsync(psi, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+        return !result.TimedOut && result.ExitCode == 0;
+    }
+
+    private async Task<string[]> GetContainerIdsAsync(bool allContainers, CancellationToken cancellationToken)
+    {
+        var psi = CreateStartInfo("docker");
+        psi.ArgumentList.Add("ps");
+
+        if (allContainers)
+        {
+            psi.ArgumentList.Add("-a");
+        }
+
+        psi.ArgumentList.Add("-q");
+
+        ProcessResult result = await _processRunner.RunAsync(psi, ShortCommandTimeout, cancellationToken).ConfigureAwait(false);
+        if (result.TimedOut || result.ExitCode != 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        return SplitLines(result.StandardOutput);
+    }
+
+    private async Task RunDockerContainerCommandInBatchesAsync(
+        string command,
+        IReadOnlyCollection<string> containerIds,
+        Action<string> onLog,
+        CancellationToken cancellationToken)
+    {
+        foreach (string[] batch in containerIds.Chunk(ContainerBatchSize))
+        {
+            var psi = CreateStartInfo("docker");
+            psi.ArgumentList.Add(command);
+
+            foreach (string containerId in batch)
+            {
+                psi.ArgumentList.Add(containerId);
+            }
+
+            ProcessResult result = await _processRunner.RunAsync(psi, ContainerCommandTimeout, cancellationToken).ConfigureAwait(false);
+            if (result.TimedOut)
+            {
+                onLog($"docker {command} timed out for a batch of {batch.Length} containers.");
+            }
+            else if (result.ExitCode != 0)
+            {
+                string error = string.IsNullOrWhiteSpace(result.StandardError)
+                    ? result.StandardOutput
+                    : result.StandardError;
+                onLog($"docker {command} returned {result.ExitCode}: {error.Trim()}");
+            }
+        }
+    }
+
+    private static async Task StopProcessByNameAsync(string processName, Action<string> onLog, CancellationToken cancellationToken)
+    {
+        foreach (Process process in Process.GetProcessesByName(processName))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.HasExited)
+                    {
+                        continue;
+                    }
+
+                    onLog($"Stopping process {processName} (PID: {process.Id})...");
+                    bool closeRequested = TryCloseMainWindow(process);
+
+                    if (closeRequested && await WaitForExitAsync(process, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false))
+                    {
+                        continue;
+                    }
+
+                    onLog($"Process {processName} did not exit gracefully; killing process tree.");
+                    process.Kill(entireProcessTree: true);
+                    if (!await WaitForExitAsync(process, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false))
+                    {
+                        onLog($"Timed out waiting for {processName} to exit after kill.");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    onLog($"Failed to stop {processName}: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    private static bool TryCloseMainWindow(Process process)
+    {
+        try
+        {
+            return process.CloseMainWindow();
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> WaitForExitAsync(Process process, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        Task waitTask = process.WaitForExitAsync(cancellationToken);
+        Task timeoutTask = Task.Delay(timeout, cancellationToken);
+
+        Task completedTask = await Task.WhenAny(waitTask, timeoutTask).ConfigureAwait(false);
+        if (completedTask != waitTask)
+        {
+            return false;
+        }
+
+        await waitTask.ConfigureAwait(false);
+        return true;
+    }
+
+    private ProcessResult RunProcessSync(ProcessStartInfo psi, TimeSpan timeout)
+    {
+        return _processRunner.RunAsync(psi, timeout).GetAwaiter().GetResult();
+    }
+
+    private static ProcessStartInfo CreateStartInfo(string fileName)
+    {
+        return new ProcessStartInfo
+        {
+            FileName = fileName,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+    }
+
+    private static string[] SplitLines(string value)
+    {
+        return value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 }
