@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using PokeSwitch.Models;
 using PokeSwitch.Services;
@@ -13,6 +14,7 @@ var tests = new (string Name, Func<Task> Run)[]
     ("GPU manager parses toggle payload", TestGpuManagerParsesTogglePayload),
     ("GPU manager parses display device list", TestGpuManagerParsesDeviceList),
     ("GPU manager reports ambiguous configured device", TestGpuManagerReportsAmbiguousDevice),
+    ("GPU manager encodes PCI instance IDs safely", TestGpuManagerEncodesPciInstanceIdsSafely),
     ("Toggle card tracks busy and failed state", TestToggleCardState)
 };
 
@@ -199,6 +201,40 @@ static async Task TestGpuManagerReportsAmbiguousDevice()
     AssertFalse(status.IsEnabled, "Ambiguous lookup should not be actionable.");
 }
 
+static async Task TestGpuManagerEncodesPciInstanceIdsSafely()
+{
+    const string instanceId = @"PCI\VEN_10DE&DEV_25A2&SUBSYS_8A4F103C&REV_A1\4&3FD8899&0&0008";
+    var runner = new FakeProcessRunner
+    {
+        NextResult = new ProcessResult(
+            0,
+            """{"found":true,"multiple":false,"friendlyName":"NVIDIA GeForce RTX 3050 Laptop GPU","instanceId":"PCI\\VEN_TEST","status":"OK","isEnabled":true,"message":"GPU status read successfully."}""",
+            "",
+            TimedOut: false)
+    };
+
+    var manager = new GpuManager(
+        new HardwareConfig
+        {
+            GpuDeviceNamePattern = "*NVIDIA*RTX 3050*",
+            GpuInstanceId = instanceId
+        },
+        runner);
+
+    await manager.GetStatusAsync();
+
+    ProcessStartInfo startInfo = runner.LastStartInfo
+        ?? throw new InvalidOperationException("Expected GPU manager to start PowerShell.");
+
+    string[] arguments = startInfo.ArgumentList.ToArray();
+    AssertTrue(arguments.Contains("-EncodedCommand"), "GPU manager should use -EncodedCommand.");
+    AssertFalse(arguments.Any(argument => argument.Contains(instanceId, StringComparison.Ordinal)), "Raw PCI instance ID should not be passed as a shell argument.");
+
+    int encodedCommandIndex = Array.IndexOf(arguments, "-EncodedCommand") + 1;
+    string decodedCommand = Encoding.Unicode.GetString(Convert.FromBase64String(arguments[encodedCommandIndex]));
+    AssertTrue(decodedCommand.Contains(instanceId, StringComparison.Ordinal), "Encoded command should contain the original instance ID as quoted data.");
+}
+
 static Task TestToggleCardState()
 {
     var state = new ToggleCardState("Play24", "Start", "Ready to start", "#107C10");
@@ -249,12 +285,14 @@ static void AssertNotNull<T>(T? value, string name)
 sealed class FakeProcessRunner : IProcessRunner
 {
     public ProcessResult NextResult { get; init; } = new(0, "", "", TimedOut: false);
+    public ProcessStartInfo? LastStartInfo { get; private set; }
 
     public Task<ProcessResult> RunAsync(
         ProcessStartInfo startInfo,
         TimeSpan timeout,
         CancellationToken cancellationToken = default)
     {
+        LastStartInfo = startInfo;
         return Task.FromResult(NextResult);
     }
 }

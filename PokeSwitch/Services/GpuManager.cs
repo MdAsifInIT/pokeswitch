@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PokeSwitch.Models;
@@ -47,8 +48,8 @@ public sealed class GpuManager : IGpuManager
     public async Task<GpuStatus> GetStatusAsync(CancellationToken cancellationToken = default)
     {
         string script = """
-            $Pattern = $args[0]
-            $InstanceId = $args[1]
+            $Pattern = $PokeSwitchArgs[0]
+            $InstanceId = $PokeSwitchArgs[1]
             $AllDevices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue)
             if (-not [string]::IsNullOrWhiteSpace($InstanceId)) {
                 $Devices = @($AllDevices | Where-Object { $_.InstanceId -eq $InstanceId })
@@ -100,8 +101,8 @@ public sealed class GpuManager : IGpuManager
     public async Task<GpuToggleResult> ToggleAsync(CancellationToken cancellationToken = default)
     {
         string script = """
-            $Pattern = $args[0]
-            $InstanceId = $args[1]
+            $Pattern = $PokeSwitchArgs[0]
+            $InstanceId = $PokeSwitchArgs[1]
             $AllDevices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue)
             if (-not [string]::IsNullOrWhiteSpace($InstanceId)) {
                 $Devices = @($AllDevices | Where-Object { $_.InstanceId -eq $InstanceId })
@@ -317,14 +318,23 @@ public sealed class GpuManager : IGpuManager
         psi.ArgumentList.Add("-NoProfile");
         psi.ArgumentList.Add("-ExecutionPolicy");
         psi.ArgumentList.Add("Bypass");
-        psi.ArgumentList.Add("-Command");
-        psi.ArgumentList.Add(script);
-        foreach (string argument in arguments)
-        {
-            psi.ArgumentList.Add(argument);
-        }
+        string encodedScript = EncodePowerShellScript(script, arguments);
+        psi.ArgumentList.Add("-EncodedCommand");
+        psi.ArgumentList.Add(encodedScript);
 
         return _processRunner.RunAsync(psi, CommandTimeout, cancellationToken);
+    }
+
+    private static string EncodePowerShellScript(string script, IReadOnlyList<string> arguments)
+    {
+        string argumentList = string.Join(", ", arguments.Select(ToPowerShellSingleQuotedString));
+        string wrappedScript = $"$PokeSwitchArgs = @({argumentList}){Environment.NewLine}{script}";
+        return Convert.ToBase64String(Encoding.Unicode.GetBytes(wrappedScript));
+    }
+
+    private static string ToPowerShellSingleQuotedString(string value)
+    {
+        return $"'{value.Replace("'", "''")}'";
     }
 
     private static GpuStatus Unavailable(string message)

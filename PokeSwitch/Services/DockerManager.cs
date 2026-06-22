@@ -17,6 +17,7 @@ public interface IDockerManager
     bool IsWslKeepAliveRunning();
     Task<(int running, int total)> GetRunningContainerCountAsync(CancellationToken cancellationToken = default);
     int GetVmMemUsageMB();
+    string[] GetInstalledDistros();
 }
 
 public class DockerManager : IDockerManager
