@@ -7,6 +7,7 @@ namespace PokeSwitch.Services;
 public interface IConfigManager
 {
     AppConfig CurrentConfig { get; }
+    string ConfigFilePath { get; }
     void Load();
     void Save();
 }
@@ -21,6 +22,7 @@ public class ConfigManager : IConfigManager
     private readonly string _configFilePath;
 
     public AppConfig CurrentConfig { get; private set; }
+    public string ConfigFilePath => _configFilePath;
 
     public ConfigManager()
         : this(GetDefaultConfigFilePath())
@@ -99,6 +101,17 @@ public class ConfigManager : IConfigManager
             MinimumPollIntervalSeconds,
             MaximumPollIntervalSeconds);
 
+        config.Hardware ??= new HardwareConfig();
+        config.Hardware.GpuDeviceNamePattern = string.IsNullOrWhiteSpace(config.Hardware.GpuDeviceNamePattern)
+            ? defaults.Hardware!.GpuDeviceNamePattern
+            : config.Hardware.GpuDeviceNamePattern.Trim();
+        config.Hardware.GpuInstanceId = string.IsNullOrWhiteSpace(config.Hardware.GpuInstanceId)
+            ? null
+            : config.Hardware.GpuInstanceId.Trim();
+
+        config.Toggles ??= new TogglesConfig();
+        config.Tray ??= new TrayConfig();
+
         return config;
     }
 
@@ -120,5 +133,13 @@ public class ConfigManager : IConfigManager
             "PokeSwitch");
 
         return Path.Combine(directory, "pokeswitch-config.json");
+    }
+
+    public static string GetLogDirectory()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PokeSwitch",
+            "logs");
     }
 }

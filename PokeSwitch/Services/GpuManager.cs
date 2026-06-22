@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using PokeSwitch.Models;
 
 namespace PokeSwitch.Services;
 
@@ -23,23 +24,37 @@ public interface IGpuManager
 {
     Task<GpuStatus> GetStatusAsync(CancellationToken cancellationToken = default);
     Task<GpuToggleResult> ToggleAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<HardwareDeviceDescriptor>> ListDisplayDevicesAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class GpuManager : IGpuManager
 {
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(30);
+    private readonly HardwareConfig _hardwareConfig;
     private readonly IProcessRunner _processRunner;
 
     public GpuManager(IProcessRunner? processRunner = null)
+        : this(new HardwareConfig(), processRunner)
     {
+    }
+
+    public GpuManager(HardwareConfig? hardwareConfig, IProcessRunner? processRunner = null)
+    {
+        _hardwareConfig = hardwareConfig ?? new HardwareConfig();
         _processRunner = processRunner ?? new ProcessRunner();
     }
 
     public async Task<GpuStatus> GetStatusAsync(CancellationToken cancellationToken = default)
     {
         string script = """
-            $Devices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
-                Where-Object { $_.FriendlyName -like "*NVIDIA*RTX 3050*" })
+            $Pattern = $args[0]
+            $InstanceId = $args[1]
+            $AllDevices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue)
+            if (-not [string]::IsNullOrWhiteSpace($InstanceId)) {
+                $Devices = @($AllDevices | Where-Object { $_.InstanceId -eq $InstanceId })
+            } else {
+                $Devices = @($AllDevices | Where-Object { $_.FriendlyName -like $Pattern })
+            }
 
             if (-not $Devices -or $Devices.Count -eq 0) {
                 [pscustomobject]@{
@@ -49,7 +64,7 @@ public sealed class GpuManager : IGpuManager
                     instanceId = $null
                     status = $null
                     isEnabled = $false
-                    message = "NVIDIA RTX 3050 GPU could not be found in Device Manager."
+                    message = "Configured GPU could not be found in Device Manager."
                 } | ConvertTo-Json -Compress
                 exit 0
             }
@@ -62,7 +77,7 @@ public sealed class GpuManager : IGpuManager
                     instanceId = $null
                     status = $null
                     isEnabled = $false
-                    message = "Multiple matching NVIDIA RTX 3050 devices found. Refusing to guess."
+                    message = "Multiple matching display devices found. Select a GPU in Settings."
                 } | ConvertTo-Json -Compress
                 exit 0
             }
@@ -79,20 +94,26 @@ public sealed class GpuManager : IGpuManager
             } | ConvertTo-Json -Compress
             """;
 
-        return await RunStatusScriptAsync(script, cancellationToken).ConfigureAwait(false);
+        return await RunStatusScriptAsync(script, cancellationToken, _hardwareConfig.GpuDeviceNamePattern, _hardwareConfig.GpuInstanceId ?? string.Empty).ConfigureAwait(false);
     }
 
     public async Task<GpuToggleResult> ToggleAsync(CancellationToken cancellationToken = default)
     {
         string script = """
-            $Devices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
-                Where-Object { $_.FriendlyName -like "*NVIDIA*RTX 3050*" })
+            $Pattern = $args[0]
+            $InstanceId = $args[1]
+            $AllDevices = @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue)
+            if (-not [string]::IsNullOrWhiteSpace($InstanceId)) {
+                $Devices = @($AllDevices | Where-Object { $_.InstanceId -eq $InstanceId })
+            } else {
+                $Devices = @($AllDevices | Where-Object { $_.FriendlyName -like $Pattern })
+            }
 
             if (-not $Devices -or $Devices.Count -eq 0) {
                 [pscustomobject]@{
                     success = $false
                     action = "None"
-                    message = "NVIDIA RTX 3050 GPU could not be found in Device Manager."
+                    message = "Configured GPU could not be found in Device Manager."
                     status = @{
                         found = $false
                         multiple = $false
@@ -100,7 +121,7 @@ public sealed class GpuManager : IGpuManager
                         instanceId = $null
                         status = $null
                         isEnabled = $false
-                        message = "NVIDIA RTX 3050 GPU could not be found in Device Manager."
+                        message = "Configured GPU could not be found in Device Manager."
                     }
                 } | ConvertTo-Json -Depth 4 -Compress
                 exit 0
@@ -110,7 +131,7 @@ public sealed class GpuManager : IGpuManager
                 [pscustomobject]@{
                     success = $false
                     action = "None"
-                    message = "Multiple matching NVIDIA RTX 3050 devices found. Refusing to guess."
+                    message = "Multiple matching display devices found. Select a GPU in Settings."
                     status = @{
                         found = $true
                         multiple = $true
@@ -118,7 +139,7 @@ public sealed class GpuManager : IGpuManager
                         instanceId = $null
                         status = $null
                         isEnabled = $false
-                        message = "Multiple matching NVIDIA RTX 3050 devices found. Refusing to guess."
+                        message = "Multiple matching display devices found. Select a GPU in Settings."
                     }
                 } | ConvertTo-Json -Depth 4 -Compress
                 exit 0
@@ -176,7 +197,7 @@ public sealed class GpuManager : IGpuManager
             }
             """;
 
-        ProcessResult result = await RunPowerShellAsync(script, cancellationToken).ConfigureAwait(false);
+        ProcessResult result = await RunPowerShellAsync(script, cancellationToken, _hardwareConfig.GpuDeviceNamePattern, _hardwareConfig.GpuInstanceId ?? string.Empty).ConfigureAwait(false);
         if (result.TimedOut)
         {
             GpuStatus status = await GetStatusAsync(cancellationToken).ConfigureAwait(false);
@@ -213,9 +234,54 @@ public sealed class GpuManager : IGpuManager
         }
     }
 
-    private async Task<GpuStatus> RunStatusScriptAsync(string script, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<HardwareDeviceDescriptor>> ListDisplayDevicesAsync(CancellationToken cancellationToken = default)
     {
+        string script = """
+            @(Get-PnpDevice -Class Display -ErrorAction SilentlyContinue | ForEach-Object {
+                [pscustomobject]@{
+                    friendlyName = $_.FriendlyName
+                    instanceId = $_.InstanceId
+                    status = $_.Status
+                }
+            }) | ConvertTo-Json -Depth 3 -Compress
+            """;
+
         ProcessResult result = await RunPowerShellAsync(script, cancellationToken).ConfigureAwait(false);
+        if (result.TimedOut || result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.StandardOutput))
+        {
+            return Array.Empty<HardwareDeviceDescriptor>();
+        }
+
+        try
+        {
+            var payload = JsonSerializer.Deserialize<List<HardwareDevicePayload>>(result.StandardOutput, JsonOptions);
+            return payload?
+                .Where(d => !string.IsNullOrWhiteSpace(d.InstanceId))
+                .Select(d => new HardwareDeviceDescriptor(
+                    d.FriendlyName ?? "Unknown display device",
+                    d.InstanceId!,
+                    d.Status ?? "Unknown"))
+                .ToArray() ?? Array.Empty<HardwareDeviceDescriptor>();
+        }
+        catch (JsonException)
+        {
+            try
+            {
+                HardwareDevicePayload? single = JsonSerializer.Deserialize<HardwareDevicePayload>(result.StandardOutput, JsonOptions);
+                return single?.InstanceId == null
+                    ? Array.Empty<HardwareDeviceDescriptor>()
+                    : new[] { new HardwareDeviceDescriptor(single.FriendlyName ?? "Unknown display device", single.InstanceId, single.Status ?? "Unknown") };
+            }
+            catch (JsonException)
+            {
+                return Array.Empty<HardwareDeviceDescriptor>();
+            }
+        }
+    }
+
+    private async Task<GpuStatus> RunStatusScriptAsync(string script, CancellationToken cancellationToken, params string[] arguments)
+    {
+        ProcessResult result = await RunPowerShellAsync(script, cancellationToken, arguments).ConfigureAwait(false);
         if (result.TimedOut)
         {
             return Unavailable("Timed out while reading GPU status.");
@@ -240,7 +306,7 @@ public sealed class GpuManager : IGpuManager
         }
     }
 
-    private Task<ProcessResult> RunPowerShellAsync(string script, CancellationToken cancellationToken)
+    private Task<ProcessResult> RunPowerShellAsync(string script, CancellationToken cancellationToken, params string[] arguments)
     {
         var psi = new ProcessStartInfo
         {
@@ -253,6 +319,10 @@ public sealed class GpuManager : IGpuManager
         psi.ArgumentList.Add("Bypass");
         psi.ArgumentList.Add("-Command");
         psi.ArgumentList.Add(script);
+        foreach (string argument in arguments)
+        {
+            psi.ArgumentList.Add(argument);
+        }
 
         return _processRunner.RunAsync(psi, CommandTimeout, cancellationToken);
     }
@@ -316,5 +386,17 @@ public sealed class GpuManager : IGpuManager
 
         [JsonPropertyName("message")]
         public string? Message { get; set; }
+    }
+
+    private sealed class HardwareDevicePayload
+    {
+        [JsonPropertyName("friendlyName")]
+        public string? FriendlyName { get; set; }
+
+        [JsonPropertyName("instanceId")]
+        public string? InstanceId { get; set; }
+
+        [JsonPropertyName("status")]
+        public string? Status { get; set; }
     }
 }

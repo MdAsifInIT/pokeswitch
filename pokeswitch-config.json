@@ -3,10 +3,24 @@
   "dockerDesktopPath": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
   "logging": {
     "enabled": true,
+    "fileEnabled": false,
     "maxLines": 500
   },
   "dashboard": {
     "pollIntervalSeconds": 3
+  },
+  "hardware": {
+    "gpuDeviceNamePattern": "*NVIDIA*RTX 3050*",
+    "gpuInstanceId": null
+  },
+  "toggles": {
+    "confirmGpuDisable": true,
+    "confirmDockerStop": true,
+    "confirmNuclearShutdown": true
+  },
+  "tray": {
+    "enabled": true,
+    "minimizeToTray": true
   },
   "autoStartWslOnLaunch": false,
   "autoStartDockerOnLaunch": false

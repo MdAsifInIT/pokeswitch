@@ -1,7 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Security.Principal;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -9,21 +15,35 @@ using System.Windows.Threading;
 using PokeSwitch.Models;
 using PokeSwitch.Services;
 using Wpf.Ui.Controls;
+using Drawing = System.Drawing;
+using Forms = System.Windows.Forms;
+using WpfApplication = System.Windows.Application;
+using WpfMessageBox = System.Windows.MessageBox;
 
 namespace PokeSwitch
 {
     public partial class MainWindow : FluentWindow, INotifyPropertyChanged
     {
+        private const int MaxRecentFailures = 10;
+
         private readonly ConfigManager _configManager;
         private readonly DockerManager _dockerManager;
-        private readonly GpuManager _gpuManager;
+        private GpuManager _gpuManager;
         private readonly DispatcherTimer _statusTimer;
         private readonly SemaphoreSlim _dashboardRefreshGate = new(1, 1);
-        private readonly SemaphoreSlim _operationGate = new(1, 1);
         private readonly CancellationTokenSource _shutdownCts = new();
         private readonly Queue<string> _logLines = new();
+        private readonly Queue<string> _recentFailures = new();
+        private readonly Forms.NotifyIcon _notifyIcon;
 
         public AppConfig Config => _configManager.CurrentConfig;
+
+        public ObservableCollection<HardwareDeviceDescriptor> DisplayDevices { get; } = new();
+
+        public ToggleCardState WslToggle { get; } = new("Play24", "Start WSL Keep-Alive", "Headless Server Mode (sleep infinity)", "#0078D4");
+        public ToggleCardState DockerToggle { get; } = new("ArrowSync24", "Boot Docker Engine", "Full spin-up of Docker & all containers", "#107C10");
+        public ToggleCardState GpuToggle { get; } = new("DeveloperBoard24", "Checking GPU...", "Configured display device status", "Gray");
+        public ToggleCardState NuclearToggle { get; } = new("Power24", "Nuclear Shutdown", "Purge all Docker + WSL processes", "#D13438");
 
         private string _dockerStatusText = "Checking...";
         public string DockerStatusText { get => _dockerStatusText; set { _dockerStatusText = value; OnPropertyChanged(); } }
@@ -43,41 +63,8 @@ namespace PokeSwitch
         private string _ramUsageText = "0 MB";
         public string RamUsageText { get => _ramUsageText; set { _ramUsageText = value; OnPropertyChanged(); } }
 
-        private string _wslCardIcon = "Play24";
-        public string WslCardIcon { get => _wslCardIcon; set { _wslCardIcon = value; OnPropertyChanged(); } }
-
-        private string _wslCardLabel = "Start WSL Keep-Alive";
-        public string WslCardLabel { get => _wslCardLabel; set { _wslCardLabel = value; OnPropertyChanged(); } }
-
-        private string _wslCardSub = "Headless Server Mode (sleep infinity)";
-        public string WslCardSub { get => _wslCardSub; set { _wslCardSub = value; OnPropertyChanged(); } }
-
-        private string _wslCardAccent = "#0078D4";
-        public string WslCardAccent { get => _wslCardAccent; set { _wslCardAccent = value; OnPropertyChanged(); } }
-
-        private string _dockerCardIcon = "ArrowSync24";
-        public string DockerCardIcon { get => _dockerCardIcon; set { _dockerCardIcon = value; OnPropertyChanged(); } }
-
-        private string _dockerCardLabel = "Boot Docker Engine";
-        public string DockerCardLabel { get => _dockerCardLabel; set { _dockerCardLabel = value; OnPropertyChanged(); } }
-
-        private string _dockerCardSub = "Full spin-up of Docker & all containers";
-        public string DockerCardSub { get => _dockerCardSub; set { _dockerCardSub = value; OnPropertyChanged(); } }
-
-        private string _dockerCardAccent = "#107C10";
-        public string DockerCardAccent { get => _dockerCardAccent; set { _dockerCardAccent = value; OnPropertyChanged(); } }
-
-        private string _gpuCardIcon = "DeveloperBoard24";
-        public string GpuCardIcon { get => _gpuCardIcon; set { _gpuCardIcon = value; OnPropertyChanged(); } }
-
-        private string _gpuCardLabel = "Checking GPU...";
-        public string GpuCardLabel { get => _gpuCardLabel; set { _gpuCardLabel = value; OnPropertyChanged(); } }
-
-        private string _gpuCardSub = "NVIDIA RTX 3050 status";
-        public string GpuCardSub { get => _gpuCardSub; set { _gpuCardSub = value; OnPropertyChanged(); } }
-
-        private string _gpuCardAccent = "Gray";
-        public string GpuCardAccent { get => _gpuCardAccent; set { _gpuCardAccent = value; OnPropertyChanged(); } }
+        private string _diagnosticsText = "Collecting diagnostics...";
+        public string DiagnosticsText { get => _diagnosticsText; set { _diagnosticsText = value; OnPropertyChanged(); } }
 
         private bool _isDockerRunning;
         private bool _isWslRunning;
@@ -93,7 +80,8 @@ namespace PokeSwitch
             _configManager.Load();
 
             _dockerManager = new DockerManager(Config);
-            _gpuManager = new GpuManager();
+            _gpuManager = CreateGpuManager();
+            _notifyIcon = CreateNotifyIcon();
 
             _statusTimer = new DispatcherTimer
             {
@@ -102,7 +90,10 @@ namespace PokeSwitch
             _statusTimer.Tick += StatusTimer_Tick;
             _statusTimer.Start();
 
+            ConfigureTray();
+
             AppendLog("Application started.");
+            RunBackground(RefreshGpuDevicesAsync, "GPU device refresh");
             RunBackground(() => UpdateDashboardAsync(_shutdownCts.Token), "Initial dashboard refresh");
 
             if (Config.AutoStartWslOnLaunch)
@@ -118,6 +109,54 @@ namespace PokeSwitch
             }
         }
 
+        private GpuManager CreateGpuManager()
+        {
+            return new GpuManager(Config.Hardware, new ProcessRunner());
+        }
+
+        private Forms.NotifyIcon CreateNotifyIcon()
+        {
+            var icon = new Forms.NotifyIcon
+            {
+                Text = "PokeSwitch",
+                Icon = ResolveTrayIcon(),
+                Visible = false,
+                ContextMenuStrip = new Forms.ContextMenuStrip()
+            };
+
+            icon.DoubleClick += (_, _) => RestoreFromTray();
+            icon.ContextMenuStrip.Items.Add("Open PokeSwitch", null, (_, _) => RestoreFromTray());
+            icon.ContextMenuStrip.Items.Add(new Forms.ToolStripSeparator());
+            icon.ContextMenuStrip.Items.Add("Toggle WSL Keep-Alive", null, (_, _) => Dispatcher.Invoke(() => _ = ToggleWslAsync()));
+            icon.ContextMenuStrip.Items.Add("Toggle Docker Engine", null, (_, _) => Dispatcher.Invoke(() => _ = ToggleDockerAsync()));
+            icon.ContextMenuStrip.Items.Add("Toggle NVIDIA GPU", null, (_, _) => Dispatcher.Invoke(() => _ = ToggleGpuAsync()));
+            icon.ContextMenuStrip.Items.Add("Nuclear Shutdown", null, (_, _) => Dispatcher.Invoke(() => _ = NuclearShutdownAsync()));
+            icon.ContextMenuStrip.Items.Add(new Forms.ToolStripSeparator());
+            icon.ContextMenuStrip.Items.Add("Exit", null, (_, _) => Dispatcher.Invoke(CloseForExit));
+
+            return icon;
+        }
+
+        private static Drawing.Icon ResolveTrayIcon()
+        {
+            try
+            {
+                string? processPath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+                return processPath == null
+                    ? Drawing.SystemIcons.Application
+                    : Drawing.Icon.ExtractAssociatedIcon(processPath) ?? Drawing.SystemIcons.Application;
+            }
+            catch
+            {
+                return Drawing.SystemIcons.Application;
+            }
+        }
+
+        private void ConfigureTray()
+        {
+            _notifyIcon.Visible = Config.Tray?.Enabled == true;
+        }
+
         private async void StatusTimer_Tick(object? sender, EventArgs e)
         {
             try
@@ -130,6 +169,7 @@ namespace PokeSwitch
             catch (Exception ex)
             {
                 AppendLog($"Dashboard refresh failed: {ex.Message}");
+                RecordFailure($"Dashboard refresh: {ex.Message}");
             }
         }
 
@@ -188,75 +228,119 @@ namespace PokeSwitch
             ContainerText = isDockerRunning ? $"{containers.running} / {containers.total}" : "-";
             RamUsageText = ram > 0 ? $"{ram} MB" : "- (idle)";
 
+            ApplyWslCardState(isWslKeepAliveRunning);
+            ApplyDockerCardState(isDockerRunning, containers.running);
+            ApplyGpuCardState(gpuStatus);
+            if (!NuclearToggle.IsRunning)
+            {
+                NuclearToggle.MarkReady(NuclearToggle.LastResult == "Running" ? "Ready" : NuclearToggle.LastResult);
+            }
+            DiagnosticsText = BuildDiagnosticsText(CreateDiagnosticsSnapshot());
+        }
+
+        private void ApplyWslCardState(bool isWslKeepAliveRunning)
+        {
+            if (WslToggle.IsRunning)
+            {
+                return;
+            }
+
             if (isWslKeepAliveRunning)
             {
-                WslCardLabel = "Stop WSL Keep-Alive";
-                WslCardIcon = "Stop24";
-                WslCardAccent = "#D83B01";
-                WslCardSub = "Running in headless mode";
+                WslToggle.Label = "Stop WSL Keep-Alive";
+                WslToggle.Icon = "Stop24";
+                WslToggle.Accent = "#D83B01";
+                WslToggle.Subtitle = "Running in headless mode";
             }
             else
             {
-                WslCardLabel = "Start WSL Keep-Alive";
-                WslCardIcon = "Play24";
-                WslCardAccent = "#0078D4";
-                WslCardSub = "Headless Server Mode (sleep infinity)";
+                WslToggle.Label = "Start WSL Keep-Alive";
+                WslToggle.Icon = "Play24";
+                WslToggle.Accent = "#0078D4";
+                WslToggle.Subtitle = "Headless Server Mode (sleep infinity)";
+            }
+
+            WslToggle.MarkReady(WslToggle.LastResult == "Running" ? "Ready" : WslToggle.LastResult);
+        }
+
+        private void ApplyDockerCardState(bool isDockerRunning, int runningContainers)
+        {
+            if (DockerToggle.IsRunning)
+            {
+                return;
             }
 
             if (isDockerRunning)
             {
-                DockerCardLabel = "Stop Docker Engine";
-                DockerCardIcon = "Stop24";
-                DockerCardAccent = "#D83B01";
-                DockerCardSub = $"Running ({containers.running} containers active)";
+                DockerToggle.Label = "Stop Docker Engine";
+                DockerToggle.Icon = "Stop24";
+                DockerToggle.Accent = "#D83B01";
+                DockerToggle.Subtitle = $"Running ({runningContainers} containers active)";
             }
             else
             {
-                DockerCardLabel = "Boot Docker Engine";
-                DockerCardIcon = "ArrowSync24";
-                DockerCardAccent = "#107C10";
-                DockerCardSub = "Full spin-up of Docker & all containers";
+                DockerToggle.Label = "Boot Docker Engine";
+                DockerToggle.Icon = "ArrowSync24";
+                DockerToggle.Accent = "#107C10";
+                DockerToggle.Subtitle = "Full spin-up of Docker & all containers";
             }
 
-            ApplyGpuCardState(gpuStatus);
+            DockerToggle.MarkReady(DockerToggle.LastResult == "Running" ? "Ready" : DockerToggle.LastResult);
         }
 
         private void ApplyGpuCardState(GpuStatus gpuStatus)
         {
-            GpuCardIcon = "DeveloperBoard24";
+            if (GpuToggle.IsRunning)
+            {
+                return;
+            }
+
+            GpuToggle.Icon = "DeveloperBoard24";
 
             if (gpuStatus.Multiple)
             {
-                GpuCardLabel = "GPU Toggle Unavailable";
-                GpuCardAccent = "#D13438";
-                GpuCardSub = gpuStatus.Message;
+                GpuToggle.Label = "GPU Toggle Unavailable";
+                GpuToggle.Accent = "#D13438";
+                GpuToggle.Subtitle = gpuStatus.Message;
+                GpuToggle.MarkFailed("Select a GPU in Settings");
                 return;
             }
 
             if (!gpuStatus.Found)
             {
-                GpuCardLabel = "GPU Not Found";
-                GpuCardAccent = "Gray";
-                GpuCardSub = gpuStatus.Message;
+                GpuToggle.Label = "GPU Not Found";
+                GpuToggle.Accent = "Gray";
+                GpuToggle.Subtitle = gpuStatus.Message;
+                GpuToggle.MarkReady("Not found");
                 return;
             }
 
             if (gpuStatus.IsEnabled)
             {
-                GpuCardLabel = "Disable NVIDIA GPU";
-                GpuCardAccent = "#D83B01";
-                GpuCardSub = $"{gpuStatus.FriendlyName} is enabled";
+                GpuToggle.Label = "Disable NVIDIA GPU";
+                GpuToggle.Accent = "#D83B01";
+                GpuToggle.Subtitle = $"{gpuStatus.FriendlyName} is enabled";
             }
             else
             {
-                GpuCardLabel = "Enable NVIDIA GPU";
-                GpuCardAccent = "#107C10";
-                GpuCardSub = $"{gpuStatus.FriendlyName} status: {gpuStatus.Status ?? "Unknown"}";
+                GpuToggle.Label = "Enable NVIDIA GPU";
+                GpuToggle.Accent = "#107C10";
+                GpuToggle.Subtitle = $"{gpuStatus.FriendlyName} status: {gpuStatus.Status ?? "Unknown"}";
             }
+
+            GpuToggle.MarkReady(GpuToggle.LastResult is "Not found" or "Failed" or "Running" ? "Ready" : GpuToggle.LastResult);
         }
 
         private void AppendLog(string message)
         {
+            string timestamp = DateTime.Now.ToString("HH:mm:ss");
+            string formatted = $"[{timestamp}] {message}";
+
+            if (Config.Logging?.FileEnabled == true)
+            {
+                WriteLogFile(formatted);
+            }
+
             if (Config.Logging?.Enabled != true || Dispatcher.HasShutdownStarted)
             {
                 return;
@@ -268,9 +352,7 @@ namespace PokeSwitch
                 return;
             }
 
-            string timestamp = DateTime.Now.ToString("HH:mm:ss");
-            _logLines.Enqueue($"[{timestamp}] {message}");
-
+            _logLines.Enqueue(formatted);
             int maxLines = Math.Clamp(Config.Logging.MaxLines, 50, 5000);
             while (_logLines.Count > maxLines)
             {
@@ -279,6 +361,39 @@ namespace PokeSwitch
 
             TxtTerminal.Text = string.Join(Environment.NewLine, _logLines);
             TerminalScrollViewer.ScrollToEnd();
+        }
+
+        private static void WriteLogFile(string line)
+        {
+            try
+            {
+                string directory = ConfigManager.GetLogDirectory();
+                Directory.CreateDirectory(directory);
+                string path = Path.Combine(directory, $"pokeswitch-{DateTime.Now:yyyyMMdd}.log");
+                File.AppendAllText(path, line + Environment.NewLine);
+                RotateLogFiles(directory);
+            }
+            catch
+            {
+                // Logging must never break a toggle action.
+            }
+        }
+
+        private static void RotateLogFiles(string directory)
+        {
+            foreach (FileInfo file in new DirectoryInfo(directory)
+                .GetFiles("pokeswitch-*.log")
+                .OrderByDescending(f => f.CreationTimeUtc)
+                .Skip(7))
+            {
+                try
+                {
+                    file.Delete();
+                }
+                catch
+                {
+                }
+            }
         }
 
         private void ShowInfo(string title, string message, InfoBarSeverity severity = InfoBarSeverity.Informational)
@@ -302,7 +417,12 @@ namespace PokeSwitch
 
         private async void WslToggle_Click(object sender, RoutedEventArgs e)
         {
-            await RunUserOperationAsync(async cancellationToken =>
+            await ToggleWslAsync();
+        }
+
+        private async Task ToggleWslAsync()
+        {
+            await RunToggleOperationAsync(WslToggle, "WSL Keep-Alive", async cancellationToken =>
             {
                 if (_isWslKeepAliveRunning)
                 {
@@ -315,32 +435,42 @@ namespace PokeSwitch
                         delay: TimeSpan.FromMilliseconds(200),
                         cancellationToken);
 
-                    if (success) ShowInfo("Success", "WSL Keep-Alive is stopped.", InfoBarSeverity.Success);
-                    else ShowInfo("Warning", "Stop command sent, but WSL is taking too long to update.", InfoBarSeverity.Warning);
+                    return success
+                        ? new ToggleActionResult(true, "Success", "WSL Keep-Alive is stopped.")
+                        : new ToggleActionResult(false, "Warning", "Stop command sent, but WSL is taking too long to update.", "Failed");
                 }
-                else
-                {
-                    ShowInfo("Executing", "Starting WSL in Headless Mode...", InfoBarSeverity.Informational);
-                    await _dockerManager.StartWslKeepAliveAsync(AppendLog, cancellationToken);
 
-                    bool success = await WaitUntilAsync(
-                        () => _dockerManager.IsWslKeepAliveRunning(),
-                        attempts: 50,
-                        delay: TimeSpan.FromMilliseconds(200),
-                        cancellationToken);
+                ShowInfo("Executing", "Starting WSL in Headless Mode...", InfoBarSeverity.Informational);
+                await _dockerManager.StartWslKeepAliveAsync(AppendLog, cancellationToken);
 
-                    if (success) ShowInfo("Success", "WSL Keep-Alive is now running in the background.", InfoBarSeverity.Success);
-                    else ShowInfo("Warning", "Start command sent, but WSL is taking too long to respond.", InfoBarSeverity.Warning);
-                }
+                bool started = await WaitUntilAsync(
+                    () => _dockerManager.IsWslKeepAliveRunning(),
+                    attempts: 50,
+                    delay: TimeSpan.FromMilliseconds(200),
+                    cancellationToken);
+
+                return started
+                    ? new ToggleActionResult(true, "Success", "WSL Keep-Alive is now running in the background.")
+                    : new ToggleActionResult(false, "Warning", "Start command sent, but WSL is taking too long to respond.", "Failed");
             });
         }
 
         private async void DockerToggle_Click(object sender, RoutedEventArgs e)
         {
-            await RunUserOperationAsync(async cancellationToken =>
+            await ToggleDockerAsync();
+        }
+
+        private async Task ToggleDockerAsync()
+        {
+            await RunToggleOperationAsync(DockerToggle, "Docker Engine", async cancellationToken =>
             {
                 if (_isDockerRunning)
                 {
+                    if (Config.Toggles?.ConfirmDockerStop == true && !Confirm("Stop Docker Engine", "Stop Docker Desktop and all running containers?"))
+                    {
+                        return new ToggleActionResult(false, "Canceled", "Docker stop canceled.", "Ready");
+                    }
+
                     ShowInfo("Executing", "Stopping Docker and containers...", InfoBarSeverity.Warning);
                     await _dockerManager.StopDockerOnlyAsync(AppendLog, cancellationToken);
 
@@ -350,42 +480,61 @@ namespace PokeSwitch
                         delay: TimeSpan.FromMilliseconds(250),
                         cancellationToken);
 
-                    if (success) ShowInfo("Success", "Docker is stopped.", InfoBarSeverity.Success);
-                    else ShowInfo("Warning", "Docker stop command sent, but processes are taking too long to exit.", InfoBarSeverity.Warning);
+                    return success
+                        ? new ToggleActionResult(true, "Success", "Docker is stopped.")
+                        : new ToggleActionResult(false, "Warning", "Docker stop command sent, but processes are taking too long to exit.", "Failed");
                 }
-                else
-                {
-                    await _dockerManager.BootDockerEngineAsync(AppendLog, cancellationToken);
-                    ShowInfo("Success", "Server Mode Active. All containers are online!", InfoBarSeverity.Success);
-                }
+
+                await _dockerManager.BootDockerEngineAsync(AppendLog, cancellationToken);
+                return new ToggleActionResult(true, "Success", "Server Mode Active. All containers are online!");
             });
         }
 
         private async void GpuToggle_Click(object sender, RoutedEventArgs e)
         {
-            await RunUserOperationAsync(async cancellationToken =>
+            await ToggleGpuAsync();
+        }
+
+        private async Task ToggleGpuAsync()
+        {
+            await RunToggleOperationAsync(GpuToggle, "NVIDIA GPU", async cancellationToken =>
             {
+                if (_gpuStatus is { Found: true, IsEnabled: true }
+                    && Config.Toggles?.ConfirmGpuDisable == true
+                    && !Confirm("Disable NVIDIA GPU", "Disable the selected NVIDIA GPU device? Close GPU-using apps first."))
+                {
+                    return new ToggleActionResult(false, "Canceled", "GPU disable canceled.", "Ready");
+                }
+
                 ShowInfo("Executing", "Toggling NVIDIA GPU...", InfoBarSeverity.Warning);
                 AppendLog($"GPU before toggle: {_gpuStatus.Message}");
 
                 GpuToggleResult result = await _gpuManager.ToggleAsync(cancellationToken);
                 AppendLog($"GPU {result.Action}: {result.Message}");
 
-                if (result.Success)
-                {
-                    ShowInfo("Success", result.Message, InfoBarSeverity.Success);
-                }
-                else
-                {
-                    ShowInfo("Warning", result.Message, InfoBarSeverity.Warning);
-                }
+                return new ToggleActionResult(
+                    result.Success,
+                    result.Success ? "Success" : "Warning",
+                    result.Message,
+                    result.Success ? "Ready" : "Failed");
             });
         }
 
         private async void NuclearShutdown_Click(object sender, RoutedEventArgs e)
         {
-            await RunUserOperationAsync(async cancellationToken =>
+            await NuclearShutdownAsync();
+        }
+
+        private async Task NuclearShutdownAsync()
+        {
+            await RunToggleOperationAsync(NuclearToggle, "Nuclear Shutdown", async cancellationToken =>
             {
+                if (Config.Toggles?.ConfirmNuclearShutdown == true
+                    && !Confirm("Nuclear Shutdown", "Stop Docker, containers, and shut down all WSL instances?"))
+                {
+                    return new ToggleActionResult(false, "Canceled", "Nuclear shutdown canceled.", "Ready");
+                }
+
                 await _dockerManager.NuclearShutdownAsync(AppendLog, cancellationToken);
 
                 bool success = await WaitUntilAsync(
@@ -396,43 +545,78 @@ namespace PokeSwitch
                     delay: TimeSpan.FromMilliseconds(250),
                     cancellationToken);
 
-                if (success) ShowInfo("Success", "Desktop Mode Active. RAM and Battery saved!", InfoBarSeverity.Success);
-                else ShowInfo("Warning", "Nuclear shutdown sent, but some processes are taking a long time to exit.", InfoBarSeverity.Warning);
+                return success
+                    ? new ToggleActionResult(true, "Success", "Desktop Mode Active. RAM and Battery saved!")
+                    : new ToggleActionResult(false, "Warning", "Nuclear shutdown sent, but some processes are taking a long time to exit.", "Failed");
             });
         }
 
-        private async Task RunUserOperationAsync(Func<CancellationToken, Task> operation)
+        private async Task RunToggleOperationAsync(
+            ToggleCardState card,
+            string operationName,
+            Func<CancellationToken, Task<ToggleActionResult>> operation)
         {
-            if (!await _operationGate.WaitAsync(0))
+            if (card.IsRunning)
             {
-                ShowInfo("Busy", "Another operation is already running.", InfoBarSeverity.Warning);
+                ShowInfo("Busy", $"{operationName} is already running.", InfoBarSeverity.Warning);
                 return;
             }
 
-            _statusTimer.Stop();
+            card.MarkRunning("Running");
             try
             {
-                await operation(_shutdownCts.Token);
+                ToggleActionResult result = await operation(_shutdownCts.Token);
+                if (result.Success)
+                {
+                    card.MarkReady(result.Message);
+                    ShowInfo(result.Title, result.Message, InfoBarSeverity.Success);
+                    Notify($"{operationName}: {result.Title}", result.Message);
+                }
+                else if (result.Title == "Canceled")
+                {
+                    card.MarkReady(result.Message);
+                    ShowInfo(result.Title, result.Message, InfoBarSeverity.Informational);
+                }
+                else
+                {
+                    card.MarkFailed(result.Message);
+                    ShowInfo(result.Title, result.Message, InfoBarSeverity.Warning);
+                    RecordFailure($"{operationName}: {result.Message}");
+                    Notify($"{operationName}: {result.Title}", result.Message);
+                }
+
                 await UpdateDashboardAsync(_shutdownCts.Token);
             }
             catch (OperationCanceledException)
             {
-                AppendLog("Operation canceled.");
+                card.MarkFailed("Operation canceled.");
+                AppendLog($"{operationName} canceled.");
             }
             catch (Exception ex)
             {
+                card.MarkFailed(ex.Message);
                 ShowInfo("Error", ex.Message, InfoBarSeverity.Error);
                 AppendLog($"Error: {ex.Message}");
+                RecordFailure($"{operationName}: {ex.Message}");
+                Notify($"{operationName}: Error", ex.Message);
             }
-            finally
-            {
-                if (!_shutdownCts.IsCancellationRequested)
-                {
-                    _statusTimer.Start();
-                }
+        }
 
-                _operationGate.Release();
+        private bool Confirm(string title, string message)
+        {
+            return WpfMessageBox.Show(this, message, title, System.Windows.MessageBoxButton.YesNo, MessageBoxImage.Warning) == System.Windows.MessageBoxResult.Yes;
+        }
+
+        private void Notify(string title, string message)
+        {
+            if (Config.Tray?.Enabled != true)
+            {
+                return;
             }
+
+            _notifyIcon.BalloonTipTitle = title;
+            _notifyIcon.BalloonTipText = message;
+            _notifyIcon.ShowBalloonTip(3000);
         }
 
         private static async Task<bool> WaitUntilAsync(
@@ -468,8 +652,38 @@ namespace PokeSwitch
                 catch (Exception ex)
                 {
                     AppendLog($"{operationName} failed: {ex.Message}");
+                    RecordFailure($"{operationName}: {ex.Message}");
                     ShowInfo("Error", $"{operationName} failed. {ex.Message}", InfoBarSeverity.Error);
                 }
+            });
+        }
+
+        private void RecordFailure(string failure)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                _recentFailures.Enqueue($"[{DateTime.Now:HH:mm:ss}] {failure}");
+                while (_recentFailures.Count > MaxRecentFailures)
+                {
+                    _recentFailures.Dequeue();
+                }
+
+                DiagnosticsText = BuildDiagnosticsText(CreateDiagnosticsSnapshot());
+            });
+        }
+
+        private async Task RefreshGpuDevicesAsync()
+        {
+            IReadOnlyList<HardwareDeviceDescriptor> devices = await _gpuManager.ListDisplayDevicesAsync(_shutdownCts.Token);
+            await Dispatcher.InvokeAsync(() =>
+            {
+                DisplayDevices.Clear();
+                foreach (HardwareDeviceDescriptor device in devices)
+                {
+                    DisplayDevices.Add(device);
+                }
+
+                OnPropertyChanged(nameof(DisplayDevices));
             });
         }
 
@@ -482,15 +696,59 @@ namespace PokeSwitch
         private void OpenSettings_Click(object sender, RoutedEventArgs e)
         {
             SettingsFlyout.IsOpen = true;
+            RunBackground(RefreshGpuDevicesAsync, "GPU device refresh");
+        }
+
+        private void RefreshGpuDevices_Click(object sender, RoutedEventArgs e)
+        {
+            RunBackground(RefreshGpuDevicesAsync, "GPU device refresh");
         }
 
         private void SaveSettings_Click(object sender, RoutedEventArgs e)
         {
             _configManager.Save();
+            _gpuManager = CreateGpuManager();
             OnPropertyChanged(nameof(Config));
             _statusTimer.Interval = TimeSpan.FromSeconds(GetPollIntervalSeconds());
+            ConfigureTray();
             SettingsFlyout.IsOpen = false;
             AppendLog("Settings saved and applied.");
+            RunBackground(() => UpdateDashboardAsync(_shutdownCts.Token), "Dashboard refresh");
+        }
+
+        private void CopyDiagnostics_Click(object sender, RoutedEventArgs e)
+        {
+            System.Windows.Clipboard.SetText(DiagnosticsText);
+            ShowInfo("Copied", "Diagnostics copied to clipboard.", InfoBarSeverity.Success);
+        }
+
+        private void ExportLog_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                string directory = ConfigManager.GetLogDirectory();
+                Directory.CreateDirectory(directory);
+                string path = Path.Combine(directory, $"pokeswitch-export-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
+
+                var builder = new StringBuilder();
+                builder.AppendLine("PokeSwitch Diagnostics");
+                builder.AppendLine(DiagnosticsText);
+                builder.AppendLine();
+                builder.AppendLine("Live Terminal");
+                foreach (string line in _logLines)
+                {
+                    builder.AppendLine(line);
+                }
+
+                File.WriteAllText(path, builder.ToString());
+                ShowInfo("Exported", $"Log exported to {path}", InfoBarSeverity.Success);
+                AppendLog($"Log exported to {path}");
+            }
+            catch (Exception ex)
+            {
+                ShowInfo("Export Failed", ex.Message, InfoBarSeverity.Error);
+                RecordFailure($"Log export: {ex.Message}");
+            }
         }
 
         private int GetPollIntervalSeconds()
@@ -498,10 +756,88 @@ namespace PokeSwitch
             return Config.Dashboard?.PollIntervalSeconds ?? 3;
         }
 
+        private DiagnosticSnapshot CreateDiagnosticsSnapshot()
+        {
+            return new DiagnosticSnapshot(
+                IsAdministrator(),
+                _configManager.ConfigFilePath,
+                _isDockerRunning,
+                _isWslRunning,
+                _isWslKeepAliveRunning,
+                _dockerManager.GetInstalledDistros(),
+                _gpuStatus,
+                _recentFailures.ToArray());
+        }
+
+        private static string BuildDiagnosticsText(DiagnosticSnapshot snapshot)
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine($"Admin: {(snapshot.IsAdministrator ? "Yes" : "No")}");
+            builder.AppendLine($"Config: {snapshot.ConfigPath}");
+            builder.AppendLine($"Docker: {(snapshot.DockerDesktopRunning ? "Running" : "Stopped")}");
+            builder.AppendLine($"WSL: {(snapshot.WslRunning ? "Active" : "Inactive")}");
+            builder.AppendLine($"WSL Keep-Alive: {(snapshot.WslKeepAliveRunning ? "Running" : "Stopped")}");
+            builder.AppendLine($"Distros: {(snapshot.InstalledDistros.Length == 0 ? "-" : string.Join(", ", snapshot.InstalledDistros))}");
+            builder.AppendLine($"GPU: {(snapshot.GpuStatus.Found ? snapshot.GpuStatus.FriendlyName : snapshot.GpuStatus.Message)}");
+            builder.AppendLine($"GPU Status: {snapshot.GpuStatus.Status ?? "-"}");
+
+            if (snapshot.RecentFailures.Count > 0)
+            {
+                builder.AppendLine("Recent Failures:");
+                foreach (string failure in snapshot.RecentFailures)
+                {
+                    builder.AppendLine($"- {failure}");
+                }
+            }
+
+            return builder.ToString().TrimEnd();
+        }
+
+        private static bool IsAdministrator()
+        {
+            using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        protected override void OnStateChanged(EventArgs e)
+        {
+            base.OnStateChanged(e);
+            if (WindowState == WindowState.Minimized && Config.Tray?.Enabled == true && Config.Tray.MinimizeToTray)
+            {
+                Hide();
+                _notifyIcon.Visible = true;
+                Notify("PokeSwitch", "Still running in the tray.");
+            }
+        }
+
+        private void RestoreFromTray()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+        }
+
+        private void CloseForExit()
+        {
+            Config.Tray!.MinimizeToTray = false;
+            Close();
+        }
+
         protected override void OnClosing(CancelEventArgs e)
         {
+            if (Config.Tray?.Enabled == true && Config.Tray.MinimizeToTray && !_shutdownCts.IsCancellationRequested)
+            {
+                e.Cancel = true;
+                Hide();
+                _notifyIcon.Visible = true;
+                Notify("PokeSwitch", "Still running in the tray.");
+                return;
+            }
+
             _shutdownCts.Cancel();
             _statusTimer.Stop();
+            _notifyIcon.Visible = false;
+            _notifyIcon.Dispose();
             base.OnClosing(e);
         }
 

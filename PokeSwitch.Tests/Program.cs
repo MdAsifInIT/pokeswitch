@@ -10,7 +10,10 @@ var tests = new (string Name, Func<Task> Run)[]
     ("Process runner captures output and exit code", TestProcessRunnerCapturesOutput),
     ("Process runner times out and kills long commands", TestProcessRunnerTimeout),
     ("GPU manager parses enabled status payload", TestGpuManagerParsesStatusPayload),
-    ("GPU manager parses toggle payload", TestGpuManagerParsesTogglePayload)
+    ("GPU manager parses toggle payload", TestGpuManagerParsesTogglePayload),
+    ("GPU manager parses display device list", TestGpuManagerParsesDeviceList),
+    ("GPU manager reports ambiguous configured device", TestGpuManagerReportsAmbiguousDevice),
+    ("Toggle card tracks busy and failed state", TestToggleCardState)
 };
 
 var failures = new List<string>();
@@ -69,6 +72,9 @@ static Task TestConfigNormalization()
 
     AssertNotNull(config.Logging, nameof(config.Logging));
     AssertNotNull(config.Dashboard, nameof(config.Dashboard));
+    AssertNotNull(config.Hardware, nameof(config.Hardware));
+    AssertNotNull(config.Toggles, nameof(config.Toggles));
+    AssertNotNull(config.Tray, nameof(config.Tray));
     return Task.CompletedTask;
 }
 
@@ -154,6 +160,61 @@ static async Task TestGpuManagerParsesTogglePayload()
     AssertTrue(result.Success, "GPU toggle should succeed.");
     AssertEqual("Disable", result.Action, nameof(result.Action));
     AssertFalse(result.Status.IsEnabled, "GPU should be disabled after toggle.");
+}
+
+static async Task TestGpuManagerParsesDeviceList()
+{
+    var runner = new FakeProcessRunner
+    {
+        NextResult = new ProcessResult(
+            0,
+            """[{"friendlyName":"Intel UHD Graphics","instanceId":"PCI\\VEN_INTEL","status":"OK"},{"friendlyName":"NVIDIA GeForce RTX 3050 Laptop GPU","instanceId":"PCI\\VEN_NVIDIA","status":"Error"}]""",
+            "",
+            TimedOut: false)
+    };
+
+    var manager = new GpuManager(runner);
+    IReadOnlyList<HardwareDeviceDescriptor> devices = await manager.ListDisplayDevicesAsync();
+
+    AssertEqual(2, devices.Count, nameof(devices.Count));
+    AssertEqual("PCI\\VEN_NVIDIA", devices[1].InstanceId, "Second device InstanceId");
+}
+
+static async Task TestGpuManagerReportsAmbiguousDevice()
+{
+    var runner = new FakeProcessRunner
+    {
+        NextResult = new ProcessResult(
+            0,
+            """{"found":true,"multiple":true,"friendlyName":null,"instanceId":null,"status":null,"isEnabled":false,"message":"Multiple matching display devices found. Select a GPU in Settings."}""",
+            "",
+            TimedOut: false)
+    };
+
+    var manager = new GpuManager(runner);
+    GpuStatus status = await manager.GetStatusAsync();
+
+    AssertTrue(status.Found, "Ambiguous lookup should still report that matching devices exist.");
+    AssertTrue(status.Multiple, "Ambiguous lookup should set Multiple.");
+    AssertFalse(status.IsEnabled, "Ambiguous lookup should not be actionable.");
+}
+
+static Task TestToggleCardState()
+{
+    var state = new ToggleCardState("Play24", "Start", "Ready to start", "#107C10");
+
+    state.MarkRunning();
+    AssertFalse(state.IsEnabled, "Running toggle should be disabled.");
+    AssertTrue(state.IsRunning, "Running toggle should report IsRunning.");
+    AssertEqual("Running", state.Status, nameof(state.Status));
+
+    state.MarkFailed("Something failed.");
+    AssertTrue(state.IsEnabled, "Failed toggle should be re-enabled.");
+    AssertFalse(state.IsRunning, "Failed toggle should stop running.");
+    AssertEqual("Failed", state.Status, nameof(state.Status));
+    AssertEqual("Something failed.", state.LastResult, nameof(state.LastResult));
+
+    return Task.CompletedTask;
 }
 
 static void AssertEqual<T>(T expected, T actual, string name)

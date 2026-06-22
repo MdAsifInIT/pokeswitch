@@ -16,6 +16,9 @@ PokeSwitch is a lightweight, clean WPF utility designed to seamlessly toggle Doc
 - **Stop Docker Engine**: Gracefully stops all active containers and shuts down Docker Desktop processes.
 - **Nuclear Shutdown**: Gracefully stops containers, shuts down Docker, and purges the WSL2 subsystem (`wsl --shutdown`) to immediately reclaim RAM.
 - **NVIDIA GPU Toggle**: Enables or disables the NVIDIA RTX 3050 display device from the GUI, refusing to act if no matching device or multiple matching devices are found.
+- **Individual Toggle States**: Each control card shows its own running, ready, failed, or not-found result instead of relying only on global status.
+- **Tray Quick Actions**: Optional system tray menu for WSL, Docker, GPU, and Nuclear Shutdown actions.
+- **Diagnostics & Logs**: Live diagnostics panel plus log export/copy actions and optional rolling log files.
 
 ---
 
@@ -53,10 +56,24 @@ The application is configured using a `pokeswitch-config.json` file located in t
   "dockerDesktopPath": "C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe",
   "logging": {
     "enabled": true,
+    "fileEnabled": false,
     "maxLines": 500
   },
   "dashboard": {
     "pollIntervalSeconds": 3
+  },
+  "hardware": {
+    "gpuDeviceNamePattern": "*NVIDIA*RTX 3050*",
+    "gpuInstanceId": null
+  },
+  "toggles": {
+    "confirmGpuDisable": true,
+    "confirmDockerStop": true,
+    "confirmNuclearShutdown": true
+  },
+  "tray": {
+    "enabled": true,
+    "minimizeToTray": true
   },
   "autoStartWslOnLaunch": false,
   "autoStartDockerOnLaunch": false
@@ -67,7 +84,13 @@ The application is configured using a `pokeswitch-config.json` file located in t
 - `wslDistroName`: The name of the WSL2 distro to run/manage.
 - `dockerDesktopPath`: The local path to your `Docker Desktop.exe` installation.
 - `logging.enabled`: Set to `true` to view status outputs in the terminal control inside the app.
+- `logging.fileEnabled`: Set to `true` to write rolling log files under `%LocalAppData%\PokeSwitch\logs`.
 - `dashboard.pollIntervalSeconds`: The interval (in seconds) at which the dashboard refreshes the status.
+- `hardware.gpuDeviceNamePattern`: Fallback display-device friendly-name match pattern for the GPU toggle.
+- `hardware.gpuInstanceId`: Saved display-device instance ID selected from Settings.
+- `toggles.*`: Enables confirmation prompts for high-impact actions.
+- `tray.enabled`: Enables the system tray menu and completion notifications.
+- `tray.minimizeToTray`: Minimizes/closes the window to the tray instead of exiting.
 - `autoStartWslOnLaunch`: Automatically start WSL keep-alive when PokeSwitch opens.
 - `autoStartDockerOnLaunch`: Automatically boot Docker Desktop and containers when PokeSwitch opens.
 
